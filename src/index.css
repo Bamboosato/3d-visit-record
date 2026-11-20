@@ -63,16 +63,19 @@
   }
 }
 
-/* 地図アプリビューは画面枠に固定し、静的ページ(/privacy, /terms)の縦スクロールは妨げない */
+/* 地図アプリビューは画面枠（iOS下部セーフエリア含む）に固定し、静的ページ(/privacy, /terms)の縦スクロールは妨げない */
 .app-viewport {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: calc(-1 * var(--safe-bottom));
   width: 100vw;
   width: 100dvw;
-  height: 100vh;
-  height: 100dvh;
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: calc(100vh + var(--safe-bottom));
+  height: calc(100dvh + var(--safe-bottom));
+  min-height: calc(100vh + var(--safe-bottom));
+  min-height: calc(100dvh + var(--safe-bottom));
   overflow: hidden;
   touch-action: manipulation;
   background-color: #020617;
