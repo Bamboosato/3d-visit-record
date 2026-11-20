@@ -299,12 +299,12 @@ export const App: React.FC = () => {
   };
 
   const handleSelectSpot = useCallback(
-    (spot: VisitSpot) => {
+    (spot: VisitSpot, options?: { preserveCamera?: boolean }) => {
       runViewTransition(() => {
         setInspectedPoint(null);
         setSelectedSpotId(spot.id);
       });
-      flyTo(spot.center, spot.camera);
+      flyTo(spot.center, options?.preserveCamera ? undefined : spot.camera);
     },
     [flyTo]
   );
@@ -721,7 +721,7 @@ export const App: React.FC = () => {
         inspectedPoint={inspectedPoint}
         onStatusChange={setGpuStatus}
         onInspectEmptyPoint={handleInspectEmptyPoint}
-        onSelectSpot={handleSelectSpot}
+        onSelectSpot={(spot) => handleSelectSpot(spot, { preserveCamera: true })}
         onCameraChange={handleCameraChange}
         mapInstanceRef={mapRef}
       />
@@ -859,7 +859,7 @@ export const App: React.FC = () => {
         onClose={() => setIsNavOpen(false)}
         spots={appState.spots}
         referenceLocation={referenceLocation}
-        onSelectSpot={handleSelectSpot}
+        onSelectSpot={(spot) => handleSelectSpot(spot)}
         onSelectSearchLocation={handleSelectSearchLocation}
         onSelectMountain={handleSelectMountain}
       />
@@ -875,7 +875,7 @@ export const App: React.FC = () => {
             setInspectedPoint(null);
           })
         }
-        onSelectExistingSpot={handleSelectSpot}
+        onSelectExistingSpot={(spot) => handleSelectSpot(spot)}
         onCreateSpot={handleCreateSpot}
         onUpdateSpotMeta={handleUpdateSpotMeta}
         onUpdateSpotCamera={handleUpdateSpotCamera}
