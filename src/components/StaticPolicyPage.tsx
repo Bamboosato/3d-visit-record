@@ -54,10 +54,10 @@ export const StaticPolicyPage: React.FC<StaticPolicyPageProps> = ({
             <section className="space-y-2">
               <h2 className="text-base font-bold text-white">1. 基本方針（サーバーレス・個人データ非保持）</h2>
               <p>
-                3D Visit Record（以下「本アプリ」）は、お客様の訪問済み・訪問予定地点の記録（座標、日付・期間、メモ、カメラ視点等）を
+                3D Visit Record（以下「本アプリ」）は、お客様の訪問済み・訪問予定地点の記録（座標、日付・期間、メモ、添付写真、カメラ視点等）を
                 開発者のサーバーや外部データベースへ送信・保存しない完全クライアントサイドの Web アプリケーションです。
-                すべての記録データは、お客様の端末ブラウザ内の IndexedDB、およびお客様ご自身の操作によって連携された
-                Google Drive にのみ保存されます。
+                添付写真を含むすべての記録データは、端末ブラウザ内でのみリサイズ・圧縮および EXIF 除去処理を行ったうえで
+                ブラウザ内の IndexedDB、およびお客様ご自身の操作によって連携された Google Drive にのみ保存されます。
               </p>
             </section>
 
@@ -74,7 +74,9 @@ export const StaticPolicyPage: React.FC<StaticPolicyPageProps> = ({
                     https://www.googleapis.com/auth/drive.file
                   </code>{' '}
                   のみです。お客様が本アプリを通じて作成した専用フォルダ（
-                  <code className="px-1 py-0.5 rounded bg-slate-900">3D Visit Record/</code>）およびその配下のファイル以外へは一切アクセスしません。
+                  <code className="px-1 py-0.5 rounded bg-slate-900">3D Visit Record/</code> および画像保管サブフォルダ{' '}
+                  <code className="px-1 py-0.5 rounded bg-slate-900">3D Visit Record/photos/</code>
+                  ）の配下に本アプリが作成したファイル以外（Google Drive 上の他ファイルや Google フォト等）へは一切アクセスしません。
                 </li>
                 <li>
                   <strong>取得するアカウント情報:</strong> 接続中のアカウントを画面上に明示するため、Google Drive API（about.get）を通じて表示名およびメールアドレスを取得し、ブラウザ上の状態表示にのみ利用します。
@@ -100,17 +102,20 @@ export const StaticPolicyPage: React.FC<StaticPolicyPageProps> = ({
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-bold text-white">3. 位置情報・地図・検索 API の通信について</h2>
+              <h2 className="text-base font-bold text-white">3. 位置情報・添付写真・地図・検索 API の通信について</h2>
               <ul className="list-disc pl-5 space-y-1.5">
                 <li>
                   <strong>現在地情報:</strong> 「現在地へ移動」ボタンを押した際、ブラウザの Geolocation API を用いて地図移動にのみ使用し、外部へ送信・記録しません。
+                </li>
+                <li>
+                  <strong>添付写真と EXIF メタデータ:</strong> 訪問記録へ写真を追加する際、端末ブラウザ内でのみリサイズ・圧縮処理を行い、元画像に含まれる GPS 位置情報や撮影機種情報等の EXIF メタデータは再エンコードにより自動的に除去されます。日付入力補助のために撮影日時のみを端末内で読み取りますが、元画像や EXIF 位置情報を外部サーバーへ送信することはありません。
                 </li>
                 <li>
                   <strong>地名・施設検索と標高取得:</strong> お客様が地図をタップまたは検索を実行した際、地点名サジェストや標高取得のために
                   OpenStreetMap（Nominatim / Overpass API）、国土地理院 地名検索 API、JAXA Earth API へ該当座標・検索語を直接照会します。
                 </li>
                 <li>
-                  <strong>3D 視点共有 URL:</strong> 共有リンクには緯度・経度・ズーム・傾き・方角・背景地図・（任意で）地点名のみを含め、訪問日・期間・メモ等の個人記録は含めません。
+                  <strong>3D 視点共有 URL:</strong> 共有リンクには緯度・経度・ズーム・傾き・方角・背景地図・（任意で）地点名のみを含め、訪問日・期間・メモ・写真・キャプション等の個人記録は一切含めません。
                 </li>
               </ul>
             </section>

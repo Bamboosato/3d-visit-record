@@ -13,7 +13,13 @@ import {
   RotateCcw,
   X,
 } from 'lucide-react';
-import type { DriveSyncMeta, SpotStatus, UndoSnapshot, VisitSpot } from '../types/visit';
+import type {
+  DriveSyncMeta,
+  PhotoStorageStats,
+  SpotStatus,
+  UndoSnapshot,
+  VisitSpot,
+} from '../types/visit';
 import {
   hasActiveMemoryToken,
   isGoogleAuthConfigured,
@@ -24,9 +30,16 @@ import {
   downloadRemoteRecords,
   fetchDriveUserInfo,
   inspectRemoteRecords,
-  saveToGoogleDrive,
   type DriveFileMeta,
 } from '../lib/googleDriveClient';
+import { getPhotoStorageStats } from '../lib/photoStorage';
+import {
+  downloadAllMissingPhotos,
+  findMissingRemotePhotos,
+  saveWithPhotosToGoogleDrive,
+  type MissingRemotePhotosSummary,
+  type PhotoSyncProgress,
+} from '../lib/photoSyncManager';
 import {
   detectBackupFormat,
   exportBackupJsonFile,
@@ -52,6 +65,8 @@ interface CloudSyncDialogProps {
   undoSnapshot: UndoSnapshot | null;
   hasUnsavedDriveChanges: boolean;
   onUpdateDriveMeta: (patch: Partial<DriveSyncMeta>) => Promise<void>;
+  onPhotoDriveIdsUpdated?: (updates: Record<string, string>) => Promise<void>;
+  onPhotoCacheUpdated?: () => void;
   onApplyImportedSpots: (options: {
     nextSpots: VisitSpot[];
     reason: 'drive-restore' | 'json-import';
@@ -61,12 +76,29 @@ interface CloudSyncDialogProps {
   onLocalExportRecorded: (iso: string) => Promise<void>;
 }
 
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatSyncProgressLabel(progress: PhotoSyncProgress): string {
+  if (progress.phase === 'checking') return 'Google Drive の状態を確認中...';
+  if (progress.phase === 'uploading-photos') {
+    return `写真をアップロード中 (${progress.completed} / ${progress.total})...`;
+  }
+  if (progress.phase === 'saving-records') return '訪問記録データを保存中...';
+  return `不要な旧写真をゴミ箱へ整理中 (${progress.completed} / ${progress.total})...`;
+}
+
 interface PendingImportState {
   sourceLabel: string;
   reason: 'drive-restore' | 'json-import';
   format: DetectedBackupFormat;
   rawText?: string;
   items: VisitSpot[];
+  photoSyncVersion?: number;
   driveMeta?: { folderId: string | null; file: DriveFileMeta; revision?: number };
 }
 
@@ -92,12 +124,15 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
   undoSnapshot,
   hasUnsavedDriveChanges,
   onUpdateDriveMeta,
+  onPhotoDriveIdsUpdated,
+  onPhotoCacheUpdated,
   onApplyImportedSpots,
   onUndoLastRestore,
   onLocalExportRecorded,
 }) => {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const syncAbortRef = useRef<AbortController | null>(null);
 
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -108,9 +143,12 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
     kind: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
+  const [syncProgressText, setSyncProgressText] = useState<string | null>(null);
+  const [storageStats, setStorageStats] = useState<PhotoStorageStats | null>(null);
+  const [missingPhotos, setMissingPhotos] = useState<MissingRemotePhotosSummary | null>(null);
 
   const [conflictState, setConflictState] = useState<{
-    folderId: string;
+    folderId: string | null;
     remoteFile: DriveFileMeta;
     reason: 'remote-newer' | 'remote-exists-unlinked';
   } | null>(null);
@@ -124,6 +162,25 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
   const authConfigured = isGoogleAuthConfigured();
   const storageBlocked = isVisitStorageBlocked();
 
+  const refreshPhotoCacheSummary = async () => {
+    try {
+      const [stats, missing] = await Promise.all([
+        getPhotoStorageStats(),
+        findMissingRemotePhotos(spots),
+      ]);
+      setStorageStats(stats);
+      setMissingPhotos(missing);
+    } catch {
+      // ignore summary refresh error
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen || busy) return;
+    void refreshPhotoCacheSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, spots, busy]);
+
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -131,12 +188,14 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
     if (isOpen) {
       setIsConnected(hasActiveMemoryToken());
       setStatusMessage(null);
+      setSyncProgressText(null);
       setConflictState(null);
       setPendingImport(null);
       if (!dialog.open) {
         dialog.showModal();
       }
     } else if (dialog.open) {
+      syncAbortRef.current?.abort();
       dialog.close();
     }
   }, [isOpen]);
@@ -182,7 +241,9 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
 
   const mergePreview = useMemo(() => {
     if (!pendingImport) return null;
-    return previewMerge(spots, pendingImport.items, importMode);
+    return previewMerge(spots, pendingImport.items, importMode, {
+      photoSyncVersion: pendingImport.photoSyncVersion,
+    });
   }, [spots, pendingImport, importMode]);
 
   const ensureTokenAndProfile = async (
@@ -230,17 +291,25 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
   };
 
   const handleSaveToDrive = async (forceOverwrite = false) => {
+    const controller = new AbortController();
+    syncAbortRef.current = controller;
     setBusy(true);
     setStatusMessage(null);
     setConflictState(null);
+    setSyncProgressText('Google Drive の状態を確認中...');
     try {
       const token = await ensureTokenAndProfile('');
-      const res = await saveToGoogleDrive({
+      const res = await saveWithPhotosToGoogleDrive({
         accessToken: token,
         spots,
         revision,
         syncMeta: driveSync,
         forceOverwrite,
+        signal: controller.signal,
+        onProgress: (p) => setSyncProgressText(formatSyncProgressLabel(p)),
+        onPhotoUploaded: async (photoId, driveFileId) => {
+          await onPhotoDriveIdsUpdated?.({ [photoId]: driveFileId });
+        },
       });
 
       if (res.outcome === 'conflict') {
@@ -254,23 +323,96 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
 
       await onUpdateDriveMeta({
         folderId: res.folderId,
+        photosFolderId: res.photosFolderId ?? driveSync.photosFolderId ?? null,
         fileId: res.fileId,
         lastDriveModifiedTime: res.modifiedTime,
         lastDriveHeadRevisionId: res.headRevisionId,
         lastSyncedRevision: res.revision,
         lastSyncedAt: res.syncedAt,
       });
+
+      const photoDetails: string[] = [];
+      if (res.uploadedPhotoCount > 0) photoDetails.push(`写真アップロード ${res.uploadedPhotoCount}枚`);
+      if (res.reusedPhotoCount > 0) photoDetails.push(`重複スキップ ${res.reusedPhotoCount}枚`);
+      if (res.trashedPhotoCount > 0) photoDetails.push(`旧写真ゴミ箱整理 ${res.trashedPhotoCount}枚`);
+      const detailSuffix = photoDetails.length > 0 ? `（${photoDetails.join(' / ')}）` : '';
+
       setStatusMessage({
         kind: 'success',
-        text: `Google Drive（3D Visit Record/visit-records.json）へ ${spots.length} 件の地点を保存しました。`,
+        text: `Google Drive（3D Visit Record/visit-records.json）へ ${spots.length} 件の地点を保存しました${detailSuffix}。`,
       });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setStatusMessage({
+          kind: 'info',
+          text: 'Google Drive への保存を中断しました。アップロード済みの写真は記録済みのため、次回続きから再開できます。',
+        });
+      } else {
+        setStatusMessage({
+          kind: 'error',
+          text: err instanceof Error ? err.message : 'Google Drive への保存に失敗しました。',
+        });
+      }
+    } finally {
+      syncAbortRef.current = null;
+      setSyncProgressText(null);
+      setBusy(false);
+      await refreshPhotoCacheSummary();
+    }
+  };
+
+  const handleBulkDownloadMissingPhotos = async () => {
+    if (!missingPhotos || missingPhotos.photos.length === 0 || busy) return;
+    const controller = new AbortController();
+    syncAbortRef.current = controller;
+    setBusy(true);
+    setStatusMessage(null);
+    setSyncProgressText(`未取得の写真をダウンロード中 (0 / ${missingPhotos.photos.length})...`);
+    try {
+      const token = await ensureTokenAndProfile('');
+      const result = await downloadAllMissingPhotos({
+        spots,
+        accessToken: token,
+        signal: controller.signal,
+        onProgress: ({ completed, total }) => {
+          setSyncProgressText(`未取得の写真をダウンロード中 (${completed} / ${total})...`);
+        },
+        onPhotoCached: () => onPhotoCacheUpdated?.(),
+      });
+
+      if (result.aborted) {
+        setStatusMessage({
+          kind: 'info',
+          text: `一括ダウンロードを中断しました（取得済み ${result.downloaded} 枚は端末にキャッシュ済みです）。`,
+        });
+      } else if (result.quotaExceeded) {
+        setStatusMessage({
+          kind: 'error',
+          text: `端末の保存容量が不足したため中断しました（${result.downloaded} 枚を保存済み）。`,
+        });
+      } else if (result.failed > 0) {
+        setStatusMessage({
+          kind: 'error',
+          text: `一括ダウンロード完了（取得 ${result.downloaded} 枚 / スキップ ${result.skipped} 枚 / 失敗 ${result.failed} 枚）${
+            result.errorMessage ? `: ${result.errorMessage}` : ''
+          }`,
+        });
+      } else {
+        setStatusMessage({
+          kind: 'success',
+          text: `${result.downloaded} 枚の写真を端末にキャッシュしました（オフラインでも閲覧できます）。`,
+        });
+      }
     } catch (err) {
       setStatusMessage({
         kind: 'error',
-        text: err instanceof Error ? err.message : 'Google Drive への保存に失敗しました。',
+        text: err instanceof Error ? err.message : '写真の一括ダウンロードに失敗しました。',
       });
     } finally {
+      syncAbortRef.current = null;
+      setSyncProgressText(null);
       setBusy(false);
+      await refreshPhotoCacheSummary();
     }
   };
 
@@ -295,6 +437,7 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
         reason: 'drive-restore',
         format: 'visit-record',
         items: downloaded.items,
+        photoSyncVersion: downloaded.photoSyncVersion,
         driveMeta: {
           folderId: inspection.folderId,
           file: downloaded.meta,
@@ -408,6 +551,7 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
         format,
         rawText: format === 'rain-viewer' ? text : undefined,
         items: parsed.items,
+        photoSyncVersion: parsed.photoSyncVersion,
       });
     } catch (err) {
       setStatusMessage({
@@ -481,6 +625,25 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
       </div>
 
       <div className="p-4 space-y-4 overflow-y-auto text-xs">
+        {syncProgressText && (
+          <div
+            role="status"
+            className="p-3 rounded-xl border border-sky-500/50 bg-sky-500/15 text-sky-100 flex items-center justify-between gap-2"
+          >
+            <span className="inline-flex items-center gap-2 min-w-0">
+              <Loader2 className="w-4 h-4 animate-spin text-sky-300 shrink-0" aria-hidden="true" />
+              <span className="truncate">{syncProgressText}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => syncAbortRef.current?.abort()}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 font-semibold shrink-0 cursor-pointer"
+            >
+              中断
+            </button>
+          </div>
+        )}
+
         {statusMessage && (
           <div
             role="status"
@@ -593,6 +756,42 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
                 )}
                 <span>Drive から復元</span>
               </button>
+            </div>
+          )}
+
+          {/* 端末写真キャッシュ状況 & 未取得写真の一括ダウンロード */}
+          {(storageStats || (missingPhotos && missingPhotos.photos.length > 0)) && (
+            <div className="pt-2 border-t border-slate-800/80 space-y-2 text-[11px] text-slate-300">
+              {storageStats && (
+                <div className="flex flex-wrap items-center justify-between gap-1 text-slate-400">
+                  <span>
+                    写真キャッシュ: 端末に {storageStats.photoCount} 枚保存中（約{' '}
+                    {formatByteSize(storageStats.totalBytes)}）
+                  </span>
+                  {storageStats.originUsageBytes !== null && storageStats.originQuotaBytes !== null && (
+                    <span className="tabular-nums">
+                      端末全体: {formatByteSize(storageStats.originUsageBytes)} /{' '}
+                      {formatByteSize(storageStats.originQuotaBytes)}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {authConfigured && missingPhotos && missingPhotos.photos.length > 0 && (
+                <button
+                  type="button"
+                  id="drive-download-all-photos-btn"
+                  disabled={busy}
+                  onClick={handleBulkDownloadMissingPhotos}
+                  className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/50 text-sky-100 font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  <CloudDownload className="w-4 h-4 text-sky-300 shrink-0" aria-hidden="true" />
+                  <span>
+                    未取得の写真をすべてダウンロード（残り {missingPhotos.photos.length} 枚 / 約{' '}
+                    {formatByteSize(missingPhotos.totalBytes)}）
+                  </span>
+                </button>
+              )}
             </div>
           )}
         </section>
@@ -711,6 +910,20 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
               </div>
             </div>
 
+            {(mergePreview.photosAdded > 0 || mergePreview.photosRemoved > 0) && (
+              <div className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] text-slate-300">
+                <span>写真差分</span>
+                <span className="font-semibold flex items-center gap-2">
+                  {mergePreview.photosAdded > 0 && (
+                    <span className="text-emerald-300">追加 +{mergePreview.photosAdded}枚</span>
+                  )}
+                  {mergePreview.photosRemoved > 0 && (
+                    <span className="text-rose-300">削除 -{mergePreview.photosRemoved}枚</span>
+                  )}
+                </span>
+              </div>
+            )}
+
             {(mergePreview.truncatedSpots > 0 || mergePreview.truncatedEntries > 0) && (
               <p className="text-[11px] text-amber-300">
                 上限超過により一部データが切り捨てられます（地点 {mergePreview.truncatedSpots}件 / ログ{' '}
@@ -797,6 +1010,9 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
             </div>
             <p className="text-[11px] text-slate-400 leading-snug">
               3D Visit Record のバックアップのほか、`3d_rain_viewer` のお気に入り JSON ファイルも読み込んで移行できます。
+            </p>
+            <p className="text-[11px] text-amber-200/90 leading-snug">
+              ※ 写真ファイル本体は JSON には含まれません。写真の引き継ぎには Google Drive 保存をご利用ください。
             </p>
             {storageBlocked && (
               <button

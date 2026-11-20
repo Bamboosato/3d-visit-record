@@ -2,7 +2,7 @@ import { abortableDelay, bounded } from './asyncLifecycle';
 import { diagnostic } from './diagnostics';
 import { clearMemoryToken, requestDriveAccessToken } from './googleAuth';
 import { buildBackupEnvelope, parseBackupJson } from './visitMerge';
-import type { DriveSyncMeta, VisitSpot } from '../types/visit';
+import type { DriveSyncMeta, PhotoAttachment, VisitSpot } from '../types/visit';
 
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -11,7 +11,9 @@ export const DRIVE_APP_PROPERTY_KEY = '3d-visit-record';
 export const DRIVE_ROOT_FOLDER_NAME = '3D Visit Record';
 export const DRIVE_RECORDS_FILE_NAME = 'visit-records.json';
 export const DRIVE_SNAPSHOTS_FOLDER_NAME = 'snapshots';
+export const DRIVE_PHOTOS_FOLDER_NAME = 'photos';
 export const MAX_DRIVE_SNAPSHOTS = 5;
+const PHOTO_TRANSFER_TIMEOUT_MS = 30000;
 
 export type DriveErrorKind =
   | 'auth'
@@ -75,13 +77,21 @@ async function driveFetchWithRetry(
   url: string,
   init: RequestInit,
   accessToken: string,
-  timeoutMs = 15000
+  timeoutMs = 15000,
+  signal?: AbortSignal
 ): Promise<Response> {
   let token = accessToken;
   let refreshedAuth = false;
 
   for (let attempt = 0; attempt <= 2; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
     const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${token}`);
 
@@ -94,14 +104,19 @@ async function driveFetchWithRetry(
       );
     } catch (err) {
       controller.abort();
+      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw err instanceof Error ? err : new DOMException('Aborted', 'AbortError');
+      }
       if (attempt < 2) {
-        await abortableDelay(300 * (attempt + 1));
+        await abortableDelay(300 * (attempt + 1), signal);
         continue;
       }
       throw new DriveApiError(
         'network',
         'Google Drive への接続に失敗しました。通信環境をご確認ください。'
       );
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
 
     if (res.status === 401 && !refreshedAuth) {
@@ -165,7 +180,7 @@ async function driveFetchWithRetry(
       const delayMs = retryAfter && Number.isFinite(Number(retryAfter))
         ? Math.min(Number(retryAfter) * 1000, 5000)
         : 400 * Math.pow(2, attempt);
-      await abortableDelay(delayMs);
+      await abortableDelay(delayMs, signal);
       continue;
     }
 
@@ -204,7 +219,8 @@ async function queryDriveFiles(
   accessToken: string,
   q: string,
   fields = 'files(id,name,modifiedTime,headRevisionId,size,trashed,appProperties)',
-  orderBy?: string
+  orderBy?: string,
+  signal?: AbortSignal
 ): Promise<DriveFileMeta[]> {
   const url = new URL(`${DRIVE_API_BASE}/files`);
   url.searchParams.set('q', q);
@@ -213,20 +229,59 @@ async function queryDriveFiles(
   url.searchParams.set('pageSize', '20');
   if (orderBy) url.searchParams.set('orderBy', orderBy);
 
-  const res = await driveFetchWithRetry(url.toString(), { method: 'GET' }, accessToken);
+  const res = await driveFetchWithRetry(url.toString(), { method: 'GET' }, accessToken, 15000, signal);
   const data = (await res.json()) as { files?: DriveFileMeta[] };
   return data.files ?? [];
 }
 
+export async function listAllDriveFilesByQuery(
+  accessToken: string,
+  q: string,
+  fields = 'files(id,name,modifiedTime,size,trashed,appProperties)',
+  orderBy?: string,
+  signal?: AbortSignal
+): Promise<DriveFileMeta[]> {
+  const normalizedFields = fields.includes('nextPageToken') ? fields : `nextPageToken,${fields}`;
+  const all: DriveFileMeta[] = [];
+  let pageToken: string | undefined;
+
+  for (let page = 0; page < 50; page++) {
+    const url = new URL(`${DRIVE_API_BASE}/files`);
+    url.searchParams.set('q', q);
+    url.searchParams.set('fields', normalizedFields);
+    url.searchParams.set('spaces', 'drive');
+    url.searchParams.set('pageSize', '100');
+    if (orderBy) url.searchParams.set('orderBy', orderBy);
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+    const res = await driveFetchWithRetry(
+      url.toString(),
+      { method: 'GET' },
+      accessToken,
+      15000,
+      signal
+    );
+    const data = (await res.json()) as { files?: DriveFileMeta[]; nextPageToken?: string };
+    if (Array.isArray(data.files)) {
+      all.push(...data.files);
+    }
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
+  }
+
+  return all;
+}
+
 async function getDriveFileMeta(
   accessToken: string,
-  fileId: string
+  fileId: string,
+  signal?: AbortSignal
 ): Promise<DriveFileMeta | null> {
   try {
     const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(
       fileId
     )}?fields=${encodeURIComponent('id,name,modifiedTime,headRevisionId,size,trashed,appProperties')}`;
-    const res = await driveFetchWithRetry(url, { method: 'GET' }, accessToken);
+    const res = await driveFetchWithRetry(url, { method: 'GET' }, accessToken, 15000, signal);
     const meta = (await res.json()) as DriveFileMeta;
     if (meta.trashed) return null;
     return meta;
@@ -240,7 +295,8 @@ async function createDriveFolder(
   accessToken: string,
   name: string,
   role: string,
-  parentId?: string
+  parentId?: string,
+  signal?: AbortSignal
 ): Promise<string> {
   const metadata: Record<string, unknown> = {
     name,
@@ -259,7 +315,9 @@ async function createDriveFolder(
       headers: { 'Content-Type': 'application/json; charset=UTF-8' },
       body: JSON.stringify(metadata),
     },
-    accessToken
+    accessToken,
+    15000,
+    signal
   );
   const created = (await res.json()) as { id: string };
   return created.id;
@@ -267,27 +325,177 @@ async function createDriveFolder(
 
 async function findRootFolderId(
   accessToken: string,
-  knownFolderId?: string | null
+  knownFolderId?: string | null,
+  signal?: AbortSignal
 ): Promise<string | null> {
   if (knownFolderId) {
-    const meta = await getDriveFileMeta(accessToken, knownFolderId);
+    const meta = await getDriveFileMeta(accessToken, knownFolderId, signal);
     if (meta) return meta.id;
   }
   const files = await queryDriveFiles(
     accessToken,
     `trashed = false and mimeType = 'application/vnd.google-apps.folder' and appProperties has { key='app' and value='${DRIVE_APP_PROPERTY_KEY}' } and appProperties has { key='role' and value='root' }`,
-    'files(id,name,modifiedTime)'
+    'files(id,name,modifiedTime)',
+    undefined,
+    signal
   );
   return files[0]?.id ?? null;
 }
 
-async function ensureRootFolderId(
+export async function ensureRootFolderId(
   accessToken: string,
-  knownFolderId?: string | null
+  knownFolderId?: string | null,
+  signal?: AbortSignal
 ): Promise<string> {
-  const existing = await findRootFolderId(accessToken, knownFolderId);
+  const existing = await findRootFolderId(accessToken, knownFolderId, signal);
   if (existing) return existing;
-  return createDriveFolder(accessToken, DRIVE_ROOT_FOLDER_NAME, 'root');
+  return createDriveFolder(accessToken, DRIVE_ROOT_FOLDER_NAME, 'root', undefined, signal);
+}
+
+export async function findPhotosFolderId(
+  accessToken: string,
+  rootFolderId: string,
+  knownPhotosFolderId?: string | null,
+  signal?: AbortSignal
+): Promise<string | null> {
+  if (knownPhotosFolderId) {
+    const meta = await getDriveFileMeta(accessToken, knownPhotosFolderId, signal);
+    if (meta) return meta.id;
+  }
+  const files = await queryDriveFiles(
+    accessToken,
+    `trashed = false and '${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and appProperties has { key='app' and value='${DRIVE_APP_PROPERTY_KEY}' } and appProperties has { key='role' and value='photos' }`,
+    'files(id,name)',
+    undefined,
+    signal
+  );
+  return files[0]?.id ?? null;
+}
+
+export async function ensurePhotosFolderId(
+  accessToken: string,
+  rootFolderId: string,
+  knownPhotosFolderId?: string | null,
+  signal?: AbortSignal
+): Promise<string> {
+  const existing = await findPhotosFolderId(accessToken, rootFolderId, knownPhotosFolderId, signal);
+  if (existing) return existing;
+  return createDriveFolder(accessToken, DRIVE_PHOTOS_FOLDER_NAME, 'photos', rootFolderId, signal);
+}
+
+export async function listRemotePhotos(
+  accessToken: string,
+  photosFolderId: string,
+  signal?: AbortSignal
+): Promise<DriveFileMeta[]> {
+  return listAllDriveFilesByQuery(
+    accessToken,
+    `trashed = false and '${photosFolderId}' in parents and appProperties has { key='app' and value='${DRIVE_APP_PROPERTY_KEY}' } and appProperties has { key='role' and value='photo' }`,
+    'files(id,name,modifiedTime,size,trashed,appProperties)',
+    undefined,
+    signal
+  );
+}
+
+export async function uploadPhotoToDrive(options: {
+  accessToken: string;
+  photosFolderId: string;
+  photo: PhotoAttachment;
+  blob: Blob;
+  signal?: AbortSignal;
+}): Promise<DriveFileMeta> {
+  const { accessToken, photosFolderId, photo, blob, signal } = options;
+  const boundary = `visit3d_photo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const appProperties: Record<string, string> = {
+    app: DRIVE_APP_PROPERTY_KEY,
+    role: 'photo',
+    photoId: photo.id,
+  };
+  if (photo.checksumSha256) {
+    appProperties.checksumSha256 = photo.checksumSha256;
+  }
+
+  const metadata = {
+    name: photo.fileName,
+    mimeType: photo.mimeType,
+    parents: [photosFolderId],
+    appProperties,
+  };
+
+  const metaPart = [
+    `--${boundary}`,
+    'Content-Type: application/json; charset=UTF-8',
+    '',
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    `Content-Type: ${photo.mimeType}`,
+    '',
+    '',
+  ].join('\r\n');
+  const closingPart = `\r\n--${boundary}--`;
+  const body = new Blob([metaPart, blob, closingPart]);
+
+  const res = await driveFetchWithRetry(
+    `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id,name,modifiedTime,size,appProperties`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+      body,
+    },
+    accessToken,
+    PHOTO_TRANSFER_TIMEOUT_MS,
+    signal
+  );
+  return (await res.json()) as DriveFileMeta;
+}
+
+export async function downloadDrivePhotoBlob(
+  accessToken: string,
+  fileId: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}?alt=media`;
+  const res = await driveFetchWithRetry(
+    url,
+    { method: 'GET' },
+    accessToken,
+    PHOTO_TRANSFER_TIMEOUT_MS,
+    signal
+  );
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new DriveApiError('invalid-data', 'Drive から取得した写真データの形式が不正です。');
+  }
+  const blob = await res.blob();
+  if (!blob || blob.size <= 0) {
+    throw new DriveApiError('invalid-data', 'Drive から空の写真データが返されました。');
+  }
+  return blob;
+}
+
+export async function trashDriveFile(
+  accessToken: string,
+  fileId: string,
+  signal?: AbortSignal
+): Promise<void> {
+  try {
+    await driveFetchWithRetry(
+      `${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}?fields=id,trashed`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify({ trashed: true }),
+      },
+      accessToken,
+      15000,
+      signal
+    );
+  } catch (err) {
+    if (err instanceof DriveApiError && err.kind === 'not-found') {
+      return;
+    }
+    throw err;
+  }
 }
 
 async function ensureSnapshotsFolderId(
@@ -305,12 +513,13 @@ async function ensureSnapshotsFolderId(
 
 export async function inspectRemoteRecords(
   accessToken: string,
-  syncMeta?: Partial<DriveSyncMeta>
+  syncMeta?: Partial<DriveSyncMeta>,
+  signal?: AbortSignal
 ): Promise<RemoteInspectionResult> {
-  const folderId = await findRootFolderId(accessToken, syncMeta?.folderId);
+  const folderId = await findRootFolderId(accessToken, syncMeta?.folderId, signal);
 
   if (syncMeta?.fileId) {
-    const meta = await getDriveFileMeta(accessToken, syncMeta.fileId);
+    const meta = await getDriveFileMeta(accessToken, syncMeta.fileId, signal);
     if (meta) {
       return { folderId, file: meta };
     }
@@ -321,16 +530,33 @@ export async function inspectRemoteRecords(
     accessToken,
     `trashed = false and ${parentFilter}appProperties has { key='app' and value='${DRIVE_APP_PROPERTY_KEY}' } and appProperties has { key='role' and value='records' }`,
     'files(id,name,modifiedTime,headRevisionId,size,trashed,appProperties)',
-    'modifiedTime desc'
+    'modifiedTime desc',
+    signal
   );
 
   return { folderId, file: files[0] ?? null };
 }
 
+export function detectRemoteConflict(
+  remoteFile: DriveFileMeta | null,
+  syncMeta: DriveSyncMeta
+): 'remote-exists-unlinked' | 'remote-newer' | null {
+  if (!remoteFile) return null;
+  if (!syncMeta.lastDriveModifiedTime) {
+    return 'remote-exists-unlinked';
+  }
+  const modifiedChanged = remoteFile.modifiedTime !== syncMeta.lastDriveModifiedTime;
+  const revChanged =
+    Boolean(remoteFile.headRevisionId) &&
+    Boolean(syncMeta.lastDriveHeadRevisionId) &&
+    remoteFile.headRevisionId !== syncMeta.lastDriveHeadRevisionId;
+  return modifiedChanged || revChanged ? 'remote-newer' : null;
+}
+
 export async function downloadRemoteRecords(
   accessToken: string,
   fileId: string
-): Promise<{ items: VisitSpot[]; revision?: number; meta: DriveFileMeta }> {
+): Promise<{ items: VisitSpot[]; revision?: number; photoSyncVersion?: number; meta: DriveFileMeta }> {
   const meta = await getDriveFileMeta(accessToken, fileId);
   if (!meta) {
     throw new DriveApiError(
@@ -350,7 +576,12 @@ export async function downloadRemoteRecords(
       outcome: 'success',
       count: parsed.items.length,
     });
-    return { items: parsed.items, revision: parsed.revision, meta };
+    return {
+      items: parsed.items,
+      revision: parsed.revision,
+      photoSyncVersion: parsed.photoSyncVersion,
+      meta,
+    };
   } catch (err) {
     diagnostic({
       operation: 'drive-sync',
@@ -446,32 +677,22 @@ export async function saveToGoogleDrive(options: {
   revision: number;
   syncMeta: DriveSyncMeta;
   forceOverwrite?: boolean;
+  signal?: AbortSignal;
 }): Promise<SaveToDriveResult> {
-  const { accessToken, spots, revision, syncMeta, forceOverwrite = false } = options;
-  const inspection = await inspectRemoteRecords(accessToken, syncMeta);
-  const folderId = inspection.folderId ?? (await ensureRootFolderId(accessToken, syncMeta.folderId));
+  const { accessToken, spots, revision, syncMeta, forceOverwrite = false, signal } = options;
+  const inspection = await inspectRemoteRecords(accessToken, syncMeta, signal);
+  const folderId =
+    inspection.folderId ?? (await ensureRootFolderId(accessToken, syncMeta.folderId, signal));
   const remoteFile = inspection.file;
 
   if (remoteFile && !forceOverwrite) {
-    if (!syncMeta.lastDriveModifiedTime) {
+    const conflictReason = detectRemoteConflict(remoteFile, syncMeta);
+    if (conflictReason) {
       return {
         outcome: 'conflict',
         folderId,
         remoteFile,
-        reason: 'remote-exists-unlinked',
-      };
-    }
-    const modifiedChanged = remoteFile.modifiedTime !== syncMeta.lastDriveModifiedTime;
-    const revChanged =
-      Boolean(remoteFile.headRevisionId) &&
-      Boolean(syncMeta.lastDriveHeadRevisionId) &&
-      remoteFile.headRevisionId !== syncMeta.lastDriveHeadRevisionId;
-    if (modifiedChanged || revChanged) {
-      return {
-        outcome: 'conflict',
-        folderId,
-        remoteFile,
-        reason: 'remote-newer',
+        reason: conflictReason,
       };
     }
   }
@@ -502,7 +723,9 @@ export async function saveToGoogleDrive(options: {
         headers: { 'Content-Type': contentType },
         body,
       },
-      accessToken
+      accessToken,
+      15000,
+      signal
     );
     savedMeta = (await res.json()) as DriveFileMeta;
   } else {
@@ -526,7 +749,9 @@ export async function saveToGoogleDrive(options: {
         headers: { 'Content-Type': contentType },
         body,
       },
-      accessToken
+      accessToken,
+      15000,
+      signal
     );
     savedMeta = (await res.json()) as DriveFileMeta;
   }

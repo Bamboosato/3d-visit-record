@@ -5,8 +5,10 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Cloud,
   Edit3,
   Image as ImageIcon,
+  Loader2,
   MapPin,
   Mountain,
   Navigation,
@@ -16,18 +18,33 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { InspectedPoint, SpotCategory, SpotStatus, VisitEntry, VisitSpot } from '../types/visit';
+import type {
+  InspectedPoint,
+  PhotoAttachment,
+  SpotCategory,
+  SpotStatus,
+  StoredPhotoRecord,
+  VisitEntry,
+  VisitSpot,
+} from '../types/visit';
 import { getSpotCategoryMeta } from '../lib/spotCategories';
 import { formatVisitDate, getTodayDateString } from '../lib/visitDate';
 import { fetchOsmPlaceContext, type OsmPlaceCandidate } from '../lib/osmPlaceClient';
 import { isHybridSpot } from '../lib/spotDomain';
+import { hasActiveMemoryToken, requestDriveAccessToken } from '../lib/googleAuth';
+import { hasStoredPhoto } from '../lib/photoStorage';
+import { ensurePhotoCached, isRemotePhotoKnownMissing } from '../lib/photoSyncManager';
+import { usePhotoObjectUrl } from '../lib/photoUrlCache';
 import { SpotForm, type SpotFormMode, type SpotFormSubmitPayload } from './SpotForm';
+import { PhotoLightbox } from './PhotoLightbox';
 import { useUpdateBlocker } from '../lib/updateGuard';
 
 interface SpotDetailSheetProps {
   selectedSpot: VisitSpot | null;
   inspectedPoint: InspectedPoint | null;
   nearbyDuplicateSpot?: VisitSpot | null;
+  photoCacheVersion?: number;
+  onPhotoCached?: () => void;
   onClose: () => void;
   onSelectExistingSpot: (spot: VisitSpot) => void;
   onCreateSpot: (payload: {
@@ -38,6 +55,8 @@ interface SpotDetailSheetProps {
     kind: SpotStatus;
     date: VisitEntry['date'];
     memo: string;
+    photos?: PhotoAttachment[];
+    newPhotoRecords?: StoredPhotoRecord[];
   }) => Promise<void>;
   onUpdateSpotMeta: (
     spotId: string,
@@ -47,17 +66,125 @@ interface SpotDetailSheetProps {
   onDeleteSpot: (spotId: string) => Promise<void>;
   onAddEntry: (
     spotId: string,
-    payload: { kind: SpotStatus; date: VisitEntry['date']; memo: string }
+    payload: {
+      kind: SpotStatus;
+      date: VisitEntry['date'];
+      memo: string;
+      photos?: PhotoAttachment[];
+      newPhotoRecords?: StoredPhotoRecord[];
+    }
   ) => Promise<void>;
   onUpdateEntry: (
     spotId: string,
     entryId: string,
-    payload: { kind: SpotStatus; date: VisitEntry['date']; memo: string }
+    payload: {
+      kind: SpotStatus;
+      date: VisitEntry['date'];
+      memo: string;
+      photos?: PhotoAttachment[];
+      newPhotoRecords?: StoredPhotoRecord[];
+    }
   ) => Promise<void>;
   onDeleteEntry: (spotId: string, entryId: string) => Promise<void>;
   onSharePoint: (lng: number, lat: number, name?: string) => void;
   onFlyToSpot: (spot: VisitSpot) => void;
 }
+
+type RemotePhotoStatus = 'loading' | 'needs-auth' | 'offline' | 'missing-remote' | 'error';
+
+const EntryPhotoThumb: React.FC<{
+  photo: PhotoAttachment;
+  index: number;
+  photoCacheVersion: number;
+  remoteStatus?: RemotePhotoStatus;
+  onOpen: () => void;
+}> = ({ photo, index, photoCacheVersion, remoteStatus, onOpen }) => {
+  const { url, loading } = usePhotoObjectUrl(photo.id, 'thumb', photoCacheVersion);
+  const isFetching = loading || remoteStatus === 'loading';
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={photo.caption ? `写真を拡大: ${photo.caption}` : `写真 ${index + 1} を拡大`}
+      title={photo.caption}
+      className="group relative aspect-square rounded-lg overflow-hidden border border-slate-700/80 hover:border-sky-400/80 bg-slate-900 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+    >
+      {url ? (
+        <img
+          src={url}
+          alt={photo.caption || `訪問写真 ${index + 1}`}
+          loading="lazy"
+          decoding="async"
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+        />
+      ) : isFetching ? (
+        <div className="w-full h-full flex items-center justify-center text-slate-400">
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" aria-hidden="true" />
+        </div>
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-0.5 px-1 text-[9px] text-slate-400">
+          {remoteStatus === 'missing-remote' ? (
+            <>
+              <ImageIcon className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+              <span>Drive未検出</span>
+            </>
+          ) : remoteStatus === 'offline' ? (
+            <>
+              <Cloud className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+              <span>オフライン</span>
+            </>
+          ) : photo.driveFileId ? (
+            <>
+              <Cloud className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
+              <span>未取得</span>
+            </>
+          ) : (
+            <ImageIcon className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+          )}
+        </div>
+      )}
+    </button>
+  );
+};
+
+const EntryPhotoStrip: React.FC<{
+  photos: PhotoAttachment[];
+  photoCacheVersion: number;
+  remoteStatusById: Record<string, RemotePhotoStatus>;
+  onLoadRemote: (photos: PhotoAttachment[]) => void;
+  onOpen: (index: number) => void;
+}> = ({ photos, photoCacheVersion, remoteStatusById, onLoadRemote, onOpen }) => {
+  if (photos.length === 0) return null;
+  const needsAuthPhotos = photos.filter(
+    (p) => p.driveFileId && (remoteStatusById[p.id] === 'needs-auth' || remoteStatusById[p.id] === 'error')
+  );
+  return (
+    <div className="pt-1 space-y-1.5">
+      <div className="grid grid-cols-5 gap-1.5">
+        {photos.map((photo, index) => (
+          <EntryPhotoThumb
+            key={photo.id}
+            photo={photo}
+            index={index}
+            photoCacheVersion={photoCacheVersion}
+            remoteStatus={remoteStatusById[photo.id]}
+            onOpen={() => onOpen(index)}
+          />
+        ))}
+      </div>
+      {needsAuthPhotos.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onLoadRemote(needsAuthPhotos)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-600/25 hover:bg-sky-600/40 border border-sky-400/40 text-sky-200 text-[11px] font-semibold cursor-pointer"
+        >
+          <Cloud className="w-3.5 h-3.5" aria-hidden="true" />
+          <span>Drive から写真を読み込む（{needsAuthPhotos.length}枚）</span>
+        </button>
+      )}
+    </div>
+  );
+};
 
 type ActiveFormState =
   | { mode: 'create-spot'; defaultKind: SpotStatus }
@@ -71,6 +198,8 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
   selectedSpot,
   inspectedPoint,
   nearbyDuplicateSpot,
+  photoCacheVersion = 0,
+  onPhotoCached,
   onClose,
   onSelectExistingSpot,
   onCreateSpot,
@@ -85,6 +214,12 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
 }) => {
   const [formState, setFormState] = useState<ActiveFormState>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [isPhotoProcessing, setIsPhotoProcessing] = useState(false);
+  const [lightboxState, setLightboxState] = useState<{
+    photos: PhotoAttachment[];
+    index: number;
+  } | null>(null);
+  const [remoteStatusById, setRemoteStatusById] = useState<Record<string, RemotePhotoStatus>>({});
   const [confirmDeleteSpot, setConfirmDeleteSpot] = useState(false);
   const [confirmDeleteEntryId, setConfirmDeleteEntryId] = useState<string | null>(null);
   const [osmCandidates, setOsmCandidates] = useState<OsmPlaceCandidate[]>([]);
@@ -92,16 +227,154 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
   const [isLoadingOsm, setIsLoadingOsm] = useState(false);
   const [cameraSavedFeedback, setCameraSavedFeedback] = useState(false);
 
-  useUpdateBlocker(formState !== null || submitting);
+  useUpdateBlocker(formState !== null || submitting || isPhotoProcessing);
 
   useEffect(() => {
     setFormState(null);
+    setIsPhotoProcessing(false);
+    setLightboxState(null);
+    setRemoteStatusById({});
     setConfirmDeleteSpot(false);
     setConfirmDeleteEntryId(null);
     setCameraSavedFeedback(false);
     setOsmCandidates([]);
     setAddressSummary(inspectedPoint?.addressSummary);
   }, [selectedSpot?.id, inspectedPoint?.lng, inspectedPoint?.lat]);
+
+  const spotPhotoSignature =
+    selectedSpot?.entries
+      .flatMap((e) => e.photos.map((p) => `${p.id}:${p.driveFileId ?? ''}`))
+      .join(',') ?? '';
+
+  const runRemotePhotoFetch = async (
+    targetPhotos: PhotoAttachment[],
+    interactiveAuth: boolean,
+    signal?: AbortSignal
+  ) => {
+    const unique: PhotoAttachment[] = [];
+    const seen = new Set<string>();
+    for (const p of targetPhotos) {
+      if (p.driveFileId && !seen.has(p.id)) {
+        seen.add(p.id);
+        unique.push(p);
+      }
+    }
+    if (unique.length === 0) return;
+
+    let accessToken: string | undefined;
+    if (interactiveAuth && !hasActiveMemoryToken()) {
+      try {
+        accessToken = await requestDriveAccessToken({ prompt: '' });
+      } catch {
+        setRemoteStatusById((prev) => {
+          const next = { ...prev };
+          for (const p of unique) next[p.id] = 'needs-auth';
+          return next;
+        });
+        return;
+      }
+    }
+
+    setRemoteStatusById((prev) => {
+      const next = { ...prev };
+      for (const p of unique) next[p.id] = 'loading';
+      return next;
+    });
+
+    let cursor = 0;
+    const workerCount = Math.min(3, unique.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (true) {
+          if (signal?.aborted) return;
+          const idx = cursor++;
+          if (idx >= unique.length) return;
+          const photo = unique[idx];
+          try {
+            const res = await ensurePhotoCached(photo, {
+              interactiveAuth,
+              accessToken,
+              signal,
+            });
+            if (signal?.aborted) return;
+            if (res.status === 'cached' || res.status === 'downloaded') {
+              setRemoteStatusById((prev) => {
+                const next = { ...prev };
+                delete next[photo.id];
+                return next;
+              });
+              if (res.status === 'downloaded') {
+                onPhotoCached?.();
+              }
+            } else {
+              setRemoteStatusById((prev) => ({ ...prev, [photo.id]: res.status }));
+            }
+          } catch (err) {
+            if (err instanceof Error && err.name === 'AbortError') return;
+            setRemoteStatusById((prev) => ({ ...prev, [photo.id]: 'error' }));
+          }
+        }
+      })
+    );
+  };
+
+  useEffect(() => {
+    if (!selectedSpot || formState !== null) return;
+    const remotePhotos = selectedSpot.entries
+      .flatMap((e) => e.photos)
+      .filter((p) => Boolean(p.driveFileId));
+    if (remotePhotos.length === 0) return;
+
+    const controller = new AbortController();
+    void (async () => {
+      const uncached: PhotoAttachment[] = [];
+      const knownMissing: string[] = [];
+
+      for (const p of remotePhotos) {
+        if (controller.signal.aborted) return;
+        if (isRemotePhotoKnownMissing(p.id)) {
+          knownMissing.push(p.id);
+          continue;
+        }
+        const stored = await hasStoredPhoto(p.id);
+        if (!stored) uncached.push(p);
+      }
+      if (controller.signal.aborted) return;
+
+      if (knownMissing.length > 0) {
+        setRemoteStatusById((prev) => {
+          const next = { ...prev };
+          for (const id of knownMissing) next[id] = 'missing-remote';
+          return next;
+        });
+      }
+
+      if (uncached.length === 0) return;
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        setRemoteStatusById((prev) => {
+          const next = { ...prev };
+          for (const p of uncached) next[p.id] = 'offline';
+          return next;
+        });
+        return;
+      }
+
+      if (!hasActiveMemoryToken()) {
+        setRemoteStatusById((prev) => {
+          const next = { ...prev };
+          for (const p of uncached) next[p.id] = 'needs-auth';
+          return next;
+        });
+        return;
+      }
+
+      await runRemotePhotoFetch(uncached, false, controller.signal);
+    })();
+
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpot?.id, formState === null, spotPhotoSignature]);
 
   useEffect(() => {
     if (!inspectedPoint || selectedSpot) return;
@@ -144,6 +417,8 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           kind: payload.kind!,
           date: payload.date!,
           memo: payload.memo ?? '',
+          photos: payload.photos,
+          newPhotoRecords: payload.newPhotoRecords,
         });
         setFormState(null);
       } else if (formState?.mode === 'edit-spot' && selectedSpot) {
@@ -158,6 +433,8 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           kind: payload.kind!,
           date: payload.date!,
           memo: payload.memo ?? '',
+          photos: payload.photos,
+          newPhotoRecords: payload.newPhotoRecords,
         });
         setFormState(null);
       } else if (
@@ -168,6 +445,8 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           kind: formState.mode === 'convert-to-visited' ? 'visited' : payload.kind!,
           date: payload.date!,
           memo: payload.memo ?? '',
+          photos: payload.photos,
+          newPhotoRecords: payload.newPhotoRecords,
         });
         setFormState(null);
       }
@@ -242,6 +521,7 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
             osmCandidates={osmCandidates}
             isLoadingOsm={isLoadingOsm}
             submitting={submitting}
+            onPhotoProcessingChange={setIsPhotoProcessing}
             onSubmit={handleFormSubmit}
             onCancel={() => setFormState(null)}
           />
@@ -459,7 +739,13 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
                 ? formState.entry.memo
                 : ''
             }
+            initialPhotos={
+              formState.mode === 'edit-entry' || formState.mode === 'convert-to-visited'
+                ? formState.entry.photos
+                : undefined
+            }
             submitting={submitting}
+            onPhotoProcessingChange={setIsPhotoProcessing}
             onSubmit={handleFormSubmit}
             onCancel={() => setFormState(null)}
           />
@@ -569,10 +855,13 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
                   )}
 
                   {entry.photos.length > 0 && (
-                    <div className="flex items-center gap-1 text-[11px] text-slate-400 pt-0.5">
-                      <ImageIcon className="w-3 h-3" aria-hidden="true" />
-                      <span>写真メタデータ {entry.photos.length}件（v2対応領域）</span>
-                    </div>
+                    <EntryPhotoStrip
+                      photos={entry.photos}
+                      photoCacheVersion={photoCacheVersion}
+                      remoteStatusById={remoteStatusById}
+                      onLoadRemote={(targetPhotos) => void runRemotePhotoFetch(targetPhotos, true)}
+                      onOpen={(index) => setLightboxState({ photos: entry.photos, index })}
+                    />
                   )}
                 </li>
               ))}
@@ -618,6 +907,16 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           </div>
         </div>
       )}
+
+      <PhotoLightbox
+        isOpen={lightboxState !== null}
+        photos={lightboxState?.photos ?? []}
+        initialIndex={lightboxState?.index ?? 0}
+        spotName={spot.name}
+        photoCacheVersion={photoCacheVersion}
+        onRequestRemotePhoto={(photo) => void runRemotePhotoFetch([photo], true)}
+        onClose={() => setLightboxState(null)}
+      />
     </section>
   );
 };

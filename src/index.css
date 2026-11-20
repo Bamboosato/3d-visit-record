@@ -120,6 +120,36 @@ dialog.visit-modal::backdrop {
   backdrop-filter: blur(4px);
 }
 
+/* Native <dialog> photo lightbox styling (Modern Web Guidance compliant) */
+dialog.visit-lightbox {
+  margin: auto;
+  padding: 0;
+  border: 1px solid rgba(51, 65, 85, 0.9);
+  border-radius: 1rem;
+  background: rgba(2, 6, 23, 0.96);
+  color: #f1f5f9;
+  width: min(96vw, 56rem);
+  max-width: min(96vw, 56rem);
+  max-height: min(92dvh, 54rem);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.85);
+}
+
+dialog.visit-lightbox[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+dialog.visit-lightbox:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.visit-lightbox::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: rgba(2, 6, 23, 0.88);
+  backdrop-filter: blur(6px);
+}
+
 /* Validation styling after user interaction (:user-invalid + fallback class) */
 .visit-input:is(:user-invalid, .user-invalid-fallback) {
   border-color: #f87171;

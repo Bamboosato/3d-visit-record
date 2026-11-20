@@ -417,6 +417,7 @@ export interface LocalAppState {
   - `script-src`: `'self'`, `https://accounts.google.com/gsi/client`
   - `connect-src`: `'self'`, `https://accounts.google.com`, `https://oauth2.googleapis.com`, `https://www.googleapis.com`, `https://tile.openstreetmap.org`, `https://cyberjapandata.gsi.go.jp`, `https://server.arcgisonline.com`, `https://msearch.gsi.go.jp`, `https://nominatim.openstreetmap.org`, `https://overpass-api.de`, `https://overpass.kumi.systems`, `https://data.earth.jaxa.jp`, `https://s3.ap-northeast-1.wasabisys.com`
   - `frame-src`: `https://accounts.google.com`
+  - `img-src`: `'self'`, `blob:`, `data:`（ローカル圧縮サムネイル・ライトボックス表示用 Object URL および Canvas 描画に必要な範囲のみ許可し、任意の外部画像 URL は読み込まない）
 
 ### 7.2 Vercel デプロイ設定（`vercel.json` / 環境変数）
 - **環境変数**: `VITE_GOOGLE_CLIENT_ID`（Google Cloud Console で発行する Web クライアント ID。OAuth クライアント ID は SPA 公開値であり、**Client Secret は SPA では一切使用・保持しない**）。

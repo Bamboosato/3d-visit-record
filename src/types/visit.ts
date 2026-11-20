@@ -14,6 +14,18 @@ export const MAX_MEMO_LENGTH = 2000;
 export const MAX_BACKUP_FILE_BYTES = 16 * 1024 * 1024;
 export const SAME_COORDINATE_TOLERANCE_DEG = 0.0005;
 
+export const MAX_PHOTOS_PER_ENTRY = 5;
+export const MAX_TOTAL_PHOTOS = 2000;
+export const MAX_PHOTO_INPUT_BYTES = 25 * 1024 * 1024;
+export const MAX_PHOTO_CAPTION_LENGTH = 200;
+export const PHOTO_DISPLAY_MAX_EDGE = 1600;
+export const PHOTO_THUMBNAIL_MAX_EDGE = 320;
+export const PHOTO_WEBP_QUALITY = 0.82;
+export const PHOTO_JPEG_FALLBACK_QUALITY = 0.85;
+export const PHOTO_THUMB_QUALITY = 0.75;
+
+export type PhotoMimeType = 'image/webp' | 'image/jpeg';
+
 export interface VisitDate {
   precision: VisitDatePrecision;
   /**
@@ -32,11 +44,11 @@ export interface VisitDate {
   end?: string;
 }
 
-/** v2以降の写真添付メタデータ（初版は常に photos: [] を保持し、前方互換を維持） */
+/** v2.0以降の写真添付メタデータ */
 export interface PhotoAttachment {
   id: string;
   fileName: string;
-  mimeType: 'image/webp' | 'image/jpeg';
+  mimeType: PhotoMimeType;
   width: number;
   height: number;
   bytes: number;
@@ -44,6 +56,37 @@ export interface PhotoAttachment {
   takenAt?: string;
   driveFileId?: string;
   checksumSha256?: string;
+}
+
+/** IndexedDB 'photos' ストアのレコード構造 */
+export interface StoredPhotoRecord {
+  id: string;
+  mimeType: PhotoMimeType;
+  width: number;
+  height: number;
+  bytes: number;
+  fullBlob: Blob;
+  thumbnailBlob: Blob;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** フォーム編集中に保持する未確定写真ドラフト（メモリ上のみ） */
+export interface DraftPhotoItem {
+  attachment: PhotoAttachment;
+  fullBlob?: Blob;
+  thumbnailBlob?: Blob;
+  previewUrl: string;
+  isNew: boolean;
+  exifLocalDate?: string;
+}
+
+/** 端末内写真ストレージ使用量サマリー */
+export interface PhotoStorageStats {
+  photoCount: number;
+  totalBytes: number;
+  originUsageBytes: number | null;
+  originQuotaBytes: number | null;
 }
 
 export interface VisitEntry {
@@ -82,6 +125,7 @@ export interface VisitBackupEnvelope {
   app: '3d-visit-record';
   kind: 'visit-records';
   schemaVersion: 1;
+  photoSyncVersion?: 2;
   exportedAt: string;
   revision: number;
   count: number;
@@ -90,6 +134,7 @@ export interface VisitBackupEnvelope {
 
 export interface DriveSyncMeta {
   folderId: string | null;
+  photosFolderId?: string | null;
   fileId: string | null;
   lastSyncedRevision: number | null;
   lastDriveModifiedTime: string | null;

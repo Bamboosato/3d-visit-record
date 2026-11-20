@@ -1,7 +1,15 @@
 import type { ErrorKind } from '../types/status';
 
 export interface DiagnosticEvent {
-  operation: 'visit-read' | 'visit-commit' | 'tile-read' | 'tile-write' | 'drive-sync';
+  operation:
+    | 'visit-read'
+    | 'visit-commit'
+    | 'tile-read'
+    | 'tile-write'
+    | 'drive-sync'
+    | 'photo-read'
+    | 'photo-write'
+    | 'photo-sync';
   backend: 'idb' | 'localStorage' | 'opfs' | 'cache' | 'memory' | 'network' | 'drive';
   outcome: 'success' | 'failure' | 'hit' | 'miss' | 'stale' | 'memory-only' | 'deferred';
   bytes?: number;

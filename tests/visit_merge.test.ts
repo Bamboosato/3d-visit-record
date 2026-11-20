@@ -3,10 +3,11 @@ import {
   buildBackupEnvelope,
   detectBackupFormat,
   parseBackupJson,
+  PHOTO_SYNC_VERSION,
   previewMerge,
   VisitTransferError,
 } from '../src/lib/visitMerge';
-import type { VisitSpot } from '../src/types/visit';
+import type { PhotoAttachment, VisitSpot } from '../src/types/visit';
 
 function makeSpot(overrides: Partial<VisitSpot> = {}): VisitSpot {
   return {
@@ -195,5 +196,171 @@ describe('visitMerge', () => {
     expect(preview.removed).toBe(1);
     expect(preview.unchanged).toBe(1);
     expect(preview.next.map((s) => s.id)).toEqual(['a', 'c']);
+    expect(preview.photosAdded).toBe(0);
+    expect(preview.photosRemoved).toBe(0);
+  });
+});
+
+function makePhoto(id: string, overrides: Partial<PhotoAttachment> = {}): PhotoAttachment {
+  return {
+    id,
+    fileName: `${id}.webp`,
+    mimeType: 'image/webp',
+    width: 1200,
+    height: 900,
+    bytes: 12345,
+    createdAt: '2026-10-10T00:00:00.000Z',
+    checksumSha256: 'a'.repeat(64),
+    ...overrides,
+  };
+}
+
+function makeSpotWithPhotos(
+  id: string,
+  photos: PhotoAttachment[],
+  updatedAt = '2026-10-10T00:00:00.000Z'
+): VisitSpot {
+  return {
+    id,
+    name: `Spot ${id}`,
+    status: 'visited',
+    category: 'nature',
+    center: [137.638, 36.248],
+    elevation: 1500,
+    camera: { zoom: 12, pitch: 55, bearing: 0 },
+    isPinned: false,
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt,
+    entries: [
+      {
+        id: `${id}-entry-1`,
+        kind: 'visited',
+        date: { precision: 'day', start: '2026-10-10' },
+        memo: 'テスト記録',
+        photos,
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt,
+      },
+    ],
+  };
+}
+
+describe('v2 photo merge & backup transfer', () => {
+  it('writes schemaVersion 1 with photoSyncVersion 2 and round-trips through parseBackupJson', () => {
+    const spot = makeSpotWithPhotos('spot-p1', [
+      makePhoto('photo-1', { caption: '  山頂の景色  ' }),
+      makePhoto('photo-2', { caption: '   ' }),
+    ]);
+
+    const envelope = buildBackupEnvelope([spot], 4);
+    expect(envelope.schemaVersion).toBe(1);
+    expect(envelope.photoSyncVersion).toBe(PHOTO_SYNC_VERSION);
+    expect(PHOTO_SYNC_VERSION).toBe(2);
+
+    const parsed = parseBackupJson(JSON.stringify(envelope));
+    expect(parsed.format).toBe('visit-record');
+    expect(parsed.revision).toBe(4);
+    expect(parsed.photoSyncVersion).toBe(2);
+    expect(parsed.items[0].entries[0].photos[0].caption).toBe('山頂の景色');
+    expect(parsed.items[0].entries[0].photos[1].caption).toBeUndefined();
+  });
+
+  it('respects full photo deletion when photoSyncVersion >= 2 and reports photo delta', () => {
+    const prev = [
+      makeSpotWithPhotos(
+        'spot-1',
+        [makePhoto('p1'), makePhoto('p2')],
+        '2026-10-10T00:00:00.000Z'
+      ),
+    ];
+    const incomingDeleted = [makeSpotWithPhotos('spot-1', [], '2026-10-12T00:00:00.000Z')];
+
+    const v2Preview = previewMerge(prev, incomingDeleted, 'merge', { photoSyncVersion: 2 });
+    expect(v2Preview.updated).toBe(1);
+    expect(v2Preview.next[0].entries[0].photos).toEqual([]);
+    expect(v2Preview.photosAdded).toBe(0);
+    expect(v2Preview.photosRemoved).toBe(2);
+
+    const incomingReplaced = [
+      makeSpotWithPhotos(
+        'spot-1',
+        [makePhoto('p2', { caption: '並び替え後' }), makePhoto('p3')],
+        '2026-10-13T00:00:00.000Z'
+      ),
+    ];
+    const reorderPreview = previewMerge(prev, incomingReplaced, 'merge', { photoSyncVersion: 2 });
+    expect(reorderPreview.next[0].entries[0].photos.map((p) => p.id)).toEqual(['p2', 'p3']);
+    expect(reorderPreview.next[0].entries[0].photos[0].caption).toBe('並び替え後');
+    expect(reorderPreview.photosAdded).toBe(1);
+    expect(reorderPreview.photosRemoved).toBe(1);
+  });
+
+  it('preserves existing photos for legacy v1 backups when incoming photos is empty', () => {
+    const prev = [
+      makeSpotWithPhotos('spot-1', [makePhoto('p1')], '2026-10-10T00:00:00.000Z'),
+    ];
+    const legacyIncoming = [makeSpotWithPhotos('spot-1', [], '2026-10-12T00:00:00.000Z')];
+
+    const v1Preview = previewMerge(prev, legacyIncoming, 'merge');
+    expect(v1Preview.updated).toBe(1);
+    expect(v1Preview.next[0].entries[0].photos.map((p) => p.id)).toEqual(['p1']);
+    expect(v1Preview.photosAdded).toBe(0);
+    expect(v1Preview.photosRemoved).toBe(0);
+  });
+
+  it('tracks photoAdded and photoRemoved in replace mode', () => {
+    const prev = [makeSpotWithPhotos('spot-1', [makePhoto('p1'), makePhoto('p2')])];
+    const incoming = [makeSpotWithPhotos('spot-2', [makePhoto('p2'), makePhoto('p3'), makePhoto('p4')])];
+
+    const replacePreview = previewMerge(prev, incoming, 'replace', { photoSyncVersion: 2 });
+    expect(replacePreview.photosAdded).toBe(2);
+    expect(replacePreview.photosRemoved).toBe(1);
+  });
+
+  it('rejects path-traversal fileName and invalid caption in parseBackupJson, and caps/dedupes photos', () => {
+    const badFileSpot = makeSpotWithPhotos('spot-bad-file', [
+      makePhoto('p1', { fileName: '../secret.webp' }),
+    ]);
+    expect(() =>
+      parseBackupJson(JSON.stringify(buildBackupEnvelope([badFileSpot])))
+    ).toThrow(VisitTransferError);
+
+    const slashFileSpot = makeSpotWithPhotos('spot-slash-file', [
+      makePhoto('p1', { fileName: 'dir/p1.webp' }),
+    ]);
+    expect(() =>
+      parseBackupJson(JSON.stringify(buildBackupEnvelope([slashFileSpot])))
+    ).toThrow(VisitTransferError);
+
+    const longCaptionSpot = makeSpotWithPhotos('spot-long-cap', [
+      makePhoto('p1', { caption: 'あ'.repeat(201) }),
+    ]);
+    expect(() =>
+      parseBackupJson(JSON.stringify(buildBackupEnvelope([longCaptionSpot])))
+    ).toThrow(VisitTransferError);
+
+    const controlCaptionSpot = makeSpotWithPhotos('spot-ctrl-cap', [
+      makePhoto('p1', { caption: 'bad\u0007caption' }),
+    ]);
+    expect(() =>
+      parseBackupJson(JSON.stringify(buildBackupEnvelope([controlCaptionSpot])))
+    ).toThrow(VisitTransferError);
+
+    const extraPhotosSpot = makeSpotWithPhotos('spot-many', [
+      makePhoto('p1'),
+      makePhoto('p1'),
+      makePhoto('p2'),
+      makePhoto('p3'),
+      makePhoto('p4'),
+      makePhoto('p5'),
+      makePhoto('p6'),
+    ]);
+    const parsedMany = parseBackupJson(JSON.stringify(buildBackupEnvelope([extraPhotosSpot])));
+    expect(parsedMany.items[0].entries[0].photos.map((p) => p.id)).toEqual([
+      'p1',
+      'p2',
+      'p3',
+      'p4',
+    ]);
   });
 });

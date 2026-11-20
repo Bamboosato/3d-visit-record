@@ -1,14 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DriveApiError,
+  downloadDrivePhotoBlob,
   downloadRemoteRecords,
+  ensurePhotosFolderId,
   fetchDriveUserInfo,
+  findPhotosFolderId,
+  listRemotePhotos,
   saveToGoogleDrive,
+  trashDriveFile,
+  uploadPhotoToDrive,
 } from '../src/lib/googleDriveClient';
 import { setGoogleAuthAdapterForTesting } from '../src/lib/googleAuth';
 import { EMPTY_DRIVE_SYNC_META } from '../src/lib/visitStorage';
 import { buildBackupEnvelope } from '../src/lib/visitMerge';
-import type { VisitSpot } from '../src/types/visit';
+import type { PhotoAttachment, VisitSpot } from '../src/types/visit';
 
 const sampleSpot: VisitSpot = {
   id: 's1',
@@ -267,5 +273,110 @@ describe('googleDriveClient', () => {
     const downloaded = await downloadRemoteRecords('tok', 'file-1');
     expect(downloaded.items).toHaveLength(1);
     expect(downloaded.items[0].name).toBe('富士山');
+  });
+
+  it('manages photos folder, paginates listRemotePhotos, uploads Blob multipart, downloads Blob, and trashes files', async () => {
+    const fetchCalls: Array<{ url: string; method: string; bodyText?: string }> = [];
+    let listPage = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      let bodyText: string | undefined;
+      if (init?.body instanceof Blob) {
+        bodyText = await init.body.text();
+      } else if (typeof init?.body === 'string') {
+        bodyText = init.body;
+      }
+      fetchCalls.push({ url, method, bodyText });
+
+      if (method === 'GET' && url.includes('/drive/v3/files?')) {
+        const q = new URL(url).searchParams.get('q') ?? '';
+        if (q.includes("role' and value='photos'")) {
+          return new Response(JSON.stringify({ files: [] }), { status: 200 });
+        }
+        if (q.includes("role' and value='photo'")) {
+          listPage++;
+          if (listPage === 1) {
+            return new Response(
+              JSON.stringify({
+                nextPageToken: 'page-2',
+                files: [{ id: 'drv-1', name: 'p1.webp', modifiedTime: '2026-11-20T00:00:00Z' }],
+              }),
+              { status: 200 }
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              files: [{ id: 'drv-2', name: 'p2.webp', modifiedTime: '2026-11-20T00:00:00Z' }],
+            }),
+            { status: 200 }
+          );
+        }
+      }
+      if (method === 'POST' && url.includes('/drive/v3/files?fields=id')) {
+        return new Response(JSON.stringify({ id: 'photos-dir-1' }), { status: 200 });
+      }
+      if (method === 'POST' && url.includes('/upload/drive/v3/files')) {
+        return new Response(
+          JSON.stringify({
+            id: 'drv-uploaded-1',
+            name: 'p-new.webp',
+            modifiedTime: '2026-11-20T00:00:00Z',
+          }),
+          { status: 200 }
+        );
+      }
+      if (method === 'GET' && url.includes('/files/drv-ok?alt=media')) {
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { 'Content-Type': 'image/webp' },
+        });
+      }
+      if (method === 'GET' && url.includes('/files/drv-missing?alt=media')) {
+        return new Response('', { status: 404 });
+      }
+      if (method === 'PATCH' && url.includes('/drive/v3/files/drv-old')) {
+        return new Response(JSON.stringify({ id: 'drv-old', trashed: true }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    expect(await findPhotosFolderId('tok', 'root-1')).toBeNull();
+    const photosDirId = await ensurePhotosFolderId('tok', 'root-1');
+    expect(photosDirId).toBe('photos-dir-1');
+
+    const listed = await listRemotePhotos('tok', photosDirId);
+    expect(listed.map((f) => f.id)).toEqual(['drv-1', 'drv-2']);
+
+    const photoMeta: PhotoAttachment = {
+      id: 'p-new',
+      fileName: 'p-new.webp',
+      mimeType: 'image/webp',
+      width: 1600,
+      height: 1200,
+      bytes: 4,
+      checksumSha256: 'c'.repeat(64),
+    };
+    const uploaded = await uploadPhotoToDrive({
+      accessToken: 'tok',
+      photosFolderId: photosDirId,
+      photo: photoMeta,
+      blob: new Blob([new Uint8Array([9, 8, 7, 6])], { type: 'image/webp' }),
+    });
+    expect(uploaded.id).toBe('drv-uploaded-1');
+    const uploadCall = fetchCalls.find((c) => c.url.includes('/upload/drive/v3/files'));
+    expect(uploadCall?.bodyText).toContain('"photoId":"p-new"');
+    expect(uploadCall?.bodyText).toContain('Content-Type: image/webp');
+
+    const downloadedBlob = await downloadDrivePhotoBlob('tok', 'drv-ok');
+    expect(downloadedBlob.size).toBe(4);
+    await expect(downloadDrivePhotoBlob('tok', 'drv-missing')).rejects.toMatchObject({
+      kind: 'not-found',
+    });
+
+    await trashDriveFile('tok', 'drv-old');
+    const trashCall = fetchCalls.find((c) => c.method === 'PATCH' && c.url.includes('drv-old'));
+    expect(trashCall?.bodyText).toBe('{"trashed":true}');
   });
 });

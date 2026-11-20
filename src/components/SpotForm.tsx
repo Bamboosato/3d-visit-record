@@ -2,9 +2,13 @@ import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Clock, Loader2, Sparkles, X } from 'lucide-react';
 import {
   MAX_MEMO_LENGTH,
+  MAX_PHOTO_CAPTION_LENGTH,
   MAX_SPOT_NAME_LENGTH,
+  type DraftPhotoItem,
+  type PhotoAttachment,
   type SpotCategory,
   type SpotStatus,
+  type StoredPhotoRecord,
   type VisitDate,
   type VisitDatePrecision,
 } from '../types/visit';
@@ -14,8 +18,15 @@ import {
   getTodayDateString,
   normalizeVisitDate,
 } from '../lib/visitDate';
-import { hasControlCharacters, sanitizeMemo, sanitizeSpotName } from '../lib/spotDomain';
+import {
+  hasControlCharacters,
+  sanitizeMemo,
+  sanitizePhotoCaption,
+  sanitizeSpotName,
+} from '../lib/spotDomain';
 import { formatDistanceLabel, type OsmPlaceCandidate } from '../lib/osmPlaceClient';
+import { acquirePhotoUrl, releasePhotoUrl } from '../lib/photoUrlCache';
+import { PhotoPickerField } from './PhotoPickerField';
 
 export type SpotFormMode =
   | 'create-spot'
@@ -31,6 +42,8 @@ export interface SpotFormSubmitPayload {
   kind?: SpotStatus;
   date?: VisitDate;
   memo?: string;
+  photos?: PhotoAttachment[];
+  newPhotoRecords?: StoredPhotoRecord[];
 }
 
 interface SpotFormProps {
@@ -41,9 +54,11 @@ interface SpotFormProps {
   initialKind?: SpotStatus;
   initialDate?: VisitDate;
   initialMemo?: string;
+  initialPhotos?: PhotoAttachment[];
   osmCandidates?: OsmPlaceCandidate[];
   isLoadingOsm?: boolean;
   submitting?: boolean;
+  onPhotoProcessingChange?: (processing: boolean) => void;
   onSubmit: (payload: SpotFormSubmitPayload) => void | Promise<void>;
   onCancel: () => void;
 }
@@ -63,9 +78,11 @@ export const SpotForm: React.FC<SpotFormProps> = ({
   initialKind = 'visited',
   initialDate,
   initialMemo = '',
+  initialPhotos = [],
   osmCandidates = [],
   isLoadingOsm = false,
   submitting = false,
+  onPhotoProcessingChange,
   onSubmit,
   onCancel,
 }) => {
@@ -93,6 +110,16 @@ export const SpotForm: React.FC<SpotFormProps> = ({
   const [endVal, setEndVal] = useState(defaultDate.end ?? '');
   const [useRange, setUseRange] = useState(Boolean(defaultDate.end));
   const [memo, setMemo] = useState(initialMemo);
+  const [draftPhotos, setDraftPhotos] = useState<DraftPhotoItem[]>(() =>
+    initialPhotos.map((attachment) => ({
+      attachment: { ...attachment },
+      previewUrl: '',
+      isNew: false,
+    }))
+  );
+  const [isProcessingPhotos, setIsProcessingPhotos] = useState(false);
+  const draftPhotosRef = useRef<DraftPhotoItem[]>(draftPhotos);
+  draftPhotosRef.current = draftPhotos;
 
   const [touched, setTouched] = useState({
     name: false,
@@ -115,6 +142,62 @@ export const SpotForm: React.FC<SpotFormProps> = ({
   const dateErrorId = `${uid}-date-err`;
   const memoHintId = `${uid}-memo-hint`;
   const memoErrorId = `${uid}-memo-err`;
+
+  // 既存写真のサムネイルキャッシュURLを取得し、アンマウント時に参照を解放する
+  useEffect(() => {
+    if (initialPhotos.length === 0) return;
+    let cancelled = false;
+    const acquired: Array<{ id: string; url: string }> = [];
+
+    void Promise.all(
+      initialPhotos.map(async (p) => {
+        const url = await acquirePhotoUrl(p.id, 'thumb');
+        return { id: p.id, url };
+      })
+    ).then((loaded) => {
+      if (cancelled) {
+        for (const item of loaded) {
+          if (item.url) releasePhotoUrl(item.id, 'thumb', item.url);
+        }
+        return;
+      }
+      const urlById = new Map<string, string>();
+      for (const item of loaded) {
+        if (item.url) {
+          acquired.push({ id: item.id, url: item.url });
+          urlById.set(item.id, item.url);
+        }
+      }
+      setDraftPhotos((prev) =>
+        prev.map((d) => {
+          if (d.isNew) return d;
+          const url = urlById.get(d.attachment.id);
+          return url ? { ...d, previewUrl: url } : d;
+        })
+      );
+    });
+
+    return () => {
+      cancelled = true;
+      for (const item of acquired) {
+        releasePhotoUrl(item.id, 'thumb', item.url);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 新規ドラフト用一時ObjectURLと処理中状態のクリーンアップ
+  useEffect(() => {
+    return () => {
+      onPhotoProcessingChange?.(false);
+      for (const item of draftPhotosRef.current) {
+        if (item.isNew && item.previewUrl && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-fill first OSM candidate if creating new spot with generic placeholder and user hasn't typed
   useEffect(() => {
@@ -223,9 +306,43 @@ export const SpotForm: React.FC<SpotFormProps> = ({
     }
   };
 
+  const photoCaptionError = useMemo(() => {
+    if (!showEntryFields) return null;
+    for (let i = 0; i < draftPhotos.length; i++) {
+      const cap = draftPhotos[i].attachment.caption ?? '';
+      if (cap.length > MAX_PHOTO_CAPTION_LENGTH) {
+        return `写真 ${i + 1} のキャプションは${MAX_PHOTO_CAPTION_LENGTH}文字以内で入力してください。`;
+      }
+      if (hasControlCharacters(cap, false)) {
+        return `写真 ${i + 1} のキャプションに使用できない制御文字が含まれています。`;
+      }
+    }
+    return null;
+  }, [showEntryFields, draftPhotos]);
+
+  const handlePhotoProcessingChange = (processing: boolean) => {
+    setIsProcessingPhotos(processing);
+    onPhotoProcessingChange?.(processing);
+  };
+
+  const handleApplySuggestedDate = (suggested: VisitDate) => {
+    if (suggested.precision !== 'day' || !suggested.start) return;
+    setPrecision('day');
+    setStartVal(suggested.start);
+    if (suggested.end && suggested.end !== suggested.start) {
+      setUseRange(true);
+      setEndVal(suggested.end);
+    } else {
+      setUseRange(false);
+      setEndVal('');
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitAttempted(true);
+
+    if (isProcessingPhotos) return;
 
     if (nameError) {
       nameInputRef.current?.focus();
@@ -240,6 +357,40 @@ export const SpotForm: React.FC<SpotFormProps> = ({
       memoInputRef.current?.focus();
       return;
     }
+    if (photoCaptionError) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const finalPhotos: PhotoAttachment[] = [];
+    const newPhotoRecords: StoredPhotoRecord[] = [];
+
+    if (showEntryFields) {
+      for (const item of draftPhotos) {
+        const cleanedCaption = sanitizePhotoCaption(item.attachment.caption);
+        const att: PhotoAttachment = { ...item.attachment };
+        if (cleanedCaption !== undefined) {
+          att.caption = cleanedCaption;
+        } else {
+          delete att.caption;
+        }
+        finalPhotos.push(att);
+
+        if (item.isNew && item.fullBlob && item.thumbnailBlob) {
+          newPhotoRecords.push({
+            id: att.id,
+            mimeType: att.mimeType,
+            width: att.width,
+            height: att.height,
+            bytes: att.bytes,
+            fullBlob: item.fullBlob,
+            thumbnailBlob: item.thumbnailBlob,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+    }
 
     await onSubmit({
       name: showSpotMeta ? sanitizeSpotName(name) : undefined,
@@ -248,6 +399,8 @@ export const SpotForm: React.FC<SpotFormProps> = ({
       kind: showEntryFields ? kind : undefined,
       date: showEntryFields ? dateValidation.value : undefined,
       memo: showEntryFields ? sanitizeMemo(memo) : undefined,
+      photos: showEntryFields ? finalPhotos : undefined,
+      newPhotoRecords: showEntryFields && newPhotoRecords.length > 0 ? newPhotoRecords : undefined,
     });
   };
 
@@ -600,6 +753,39 @@ export const SpotForm: React.FC<SpotFormProps> = ({
               </p>
             )}
           </div>
+
+          {/* 写真添付（訪問済みログのみ） */}
+          {kind === 'visited' ? (
+            <PhotoPickerField
+              photos={draftPhotos}
+              onChangePhotos={setDraftPhotos}
+              onProcessingChange={handlePhotoProcessingChange}
+              currentDate={
+                precision === 'none'
+                  ? { precision: 'none' }
+                  : {
+                      precision,
+                      start: startVal || undefined,
+                      end: useRange && endVal ? endVal : undefined,
+                    }
+              }
+              onApplySuggestedDate={handleApplySuggestedDate}
+              disabled={submitting}
+            />
+          ) : (
+            draftPhotos.length > 0 && (
+              <p className="p-2 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-300">
+                ※ 訪問予定へ変更しても既存の添付写真（{draftPhotos.length}枚）は保持されます。
+              </p>
+            )
+          )}
+
+          {photoCaptionError && submitAttempted && (
+            <p className="flex items-center gap-1 text-[11px] text-rose-300">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-label="エラー" />
+              <span>{photoCaptionError}</span>
+            </p>
+          )}
         </div>
       )}
 
@@ -615,10 +801,12 @@ export const SpotForm: React.FC<SpotFormProps> = ({
         </button>
         <button
           type="submit"
-          disabled={submitting}
+          disabled={submitting || isProcessingPhotos}
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold shadow cursor-pointer disabled:opacity-50"
         >
-          {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
+          {(submitting || isProcessingPhotos) && (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+          )}
           <span>{submitLabel}</span>
         </button>
       </div>

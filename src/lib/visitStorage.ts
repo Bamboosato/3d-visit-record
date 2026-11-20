@@ -1,27 +1,39 @@
 import { diagnostic } from './diagnostics';
-import { cloneSpots, isValidVisitSpot } from './spotDomain';
+import {
+  openVisitDb,
+  pruneOrphanPhotosInDb,
+  putStoredPhotosInTx,
+  STORE_APP_STATE,
+  STORE_PHOTOS,
+  VISIT_DB_NAME,
+} from './photoStorage';
+import {
+  cloneSpots,
+  collectReferencedPhotoIds,
+  countTotalPhotos,
+  isValidVisitSpot,
+} from './spotDomain';
 import {
   MAX_SPOTS,
+  MAX_TOTAL_PHOTOS,
   type BaseMapId,
   type DriveSyncMeta,
   type LocalAppState,
   type StatusFilterValue,
+  type StoredPhotoRecord,
   type UiPreferences,
   type UndoSnapshot,
   type VisitSpot,
 } from '../types/visit';
 import type { ErrorKind } from '../types/status';
 
-const DB_NAME = 'visit3d_db';
-const DB_VERSION = 1;
-const STORE_APP_STATE = 'app_state';
-const STORE_PHOTOS = 'photos';
 const PRIMARY_KEY = 'primary';
 
 const UI_PREFS_LOCAL_KEY = 'visit3d_ui_prefs_v1';
 
 export const EMPTY_DRIVE_SYNC_META: DriveSyncMeta = {
   folderId: null,
+  photosFolderId: null,
   fileId: null,
   lastSyncedRevision: null,
   lastDriveModifiedTime: null,
@@ -119,40 +131,6 @@ export function saveUiPreferences(prefs: UiPreferences): void {
   }
 }
 
-function openVisitDb(): Promise<IDBDatabase | null> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (db: IDBDatabase | null) => {
-      if (settled) {
-        db?.close?.();
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(db);
-    };
-    const timer = setTimeout(() => finish(null), 5000);
-    try {
-      if (typeof indexedDB === 'undefined' || !indexedDB) return finish(null);
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(STORE_APP_STATE)) {
-          db.createObjectStore(STORE_APP_STATE);
-        }
-        if (!db.objectStoreNames.contains(STORE_PHOTOS)) {
-          db.createObjectStore(STORE_PHOTOS);
-        }
-      };
-      req.onsuccess = () => finish(req.result);
-      req.onerror = () => finish(null);
-      req.onblocked = () => finish(null);
-    } catch {
-      finish(null);
-    }
-  });
-}
-
 async function dbRead(db: IDBDatabase, storeName: string, key: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readonly');
@@ -185,6 +163,7 @@ function parseDriveSyncMeta(raw: unknown): DriveSyncMeta {
   const m = raw as Partial<DriveSyncMeta>;
   return {
     folderId: typeof m.folderId === 'string' ? m.folderId : null,
+    photosFolderId: typeof m.photosFolderId === 'string' ? m.photosFolderId : null,
     fileId: typeof m.fileId === 'string' ? m.fileId : null,
     lastSyncedRevision:
       typeof m.lastSyncedRevision === 'number' && Number.isSafeInteger(m.lastSyncedRevision)
@@ -304,7 +283,21 @@ async function readStateFromDb(): Promise<LocalAppState> {
   }
 }
 
-async function commitStateToDb(state: LocalAppState): Promise<StorageOperationResult> {
+function collectReferencedIdsForState(state: LocalAppState): Set<string> {
+  const ids = collectReferencedPhotoIds(state.spots);
+  if (state.undo) {
+    for (const id of collectReferencedPhotoIds(state.undo.spots)) {
+      ids.add(id);
+    }
+  }
+  return ids;
+}
+
+async function commitStateToDb(
+  state: LocalAppState,
+  options?: { newPhotos?: StoredPhotoRecord[]; pruneOrphans?: boolean }
+): Promise<StorageOperationResult> {
+  const newPhotos = options?.newPhotos ?? [];
   const db = await openVisitDb();
   if (!db) {
     diagnostic({
@@ -322,15 +315,19 @@ async function commitStateToDb(state: LocalAppState): Promise<StorageOperationRe
 
   try {
     let quotaExceeded = false;
+    const storeNames =
+      newPhotos.length > 0 ? [STORE_APP_STATE, STORE_PHOTOS] : [STORE_APP_STATE];
+    const timeoutMs = newPhotos.length > 0 ? 10000 : 5000;
+
     const ok = await new Promise<boolean>((resolve) => {
-      const tx = db.transaction(STORE_APP_STATE, 'readwrite');
+      const tx = db.transaction(storeNames, 'readwrite');
       const timer = setTimeout(() => {
         try {
           tx.abort();
         } catch {
           // ended
         }
-      }, 5000);
+      }, timeoutMs);
       tx.oncomplete = () => {
         clearTimeout(timer);
         resolve(true);
@@ -345,6 +342,9 @@ async function commitStateToDb(state: LocalAppState): Promise<StorageOperationRe
         quotaExceeded = tx.error?.name === 'QuotaExceededError';
         resolve(false);
       };
+      if (newPhotos.length > 0) {
+        putStoredPhotosInTx(tx, newPhotos);
+      }
       tx.objectStore(STORE_APP_STATE).put(state, PRIMARY_KEY);
     });
 
@@ -372,6 +372,15 @@ async function commitStateToDb(state: LocalAppState): Promise<StorageOperationRe
       outcome: 'success',
       count: state.spots.length,
     });
+
+    if (options?.pruneOrphans) {
+      try {
+        await pruneOrphanPhotosInDb(db, collectReferencedIdsForState(state));
+      } catch {
+        // ベストエフォートのGC失敗では本体保存成功を妨げない
+      }
+    }
+
     return { success: true, state };
   } finally {
     db.close?.();
@@ -394,6 +403,13 @@ function validateSpotsForWrite(spots: VisitSpot[]): StorageOperationResult | nul
       message: '地点IDが重複しているため保存を停止しました。',
     };
   }
+  if (countTotalPhotos(spots) > MAX_TOTAL_PHOTOS) {
+    return {
+      success: false,
+      error: 'invalid-data',
+      message: `登録できる写真の総数は最大 ${MAX_TOTAL_PHOTOS} 枚までです。`,
+    };
+  }
   if (!spots.every(isValidVisitSpot)) {
     return {
       success: false,
@@ -404,8 +420,37 @@ function validateSpotsForWrite(spots: VisitSpot[]): StorageOperationResult | nul
   return null;
 }
 
+function validateNewPhotosForWrite(records: StoredPhotoRecord[]): StorageOperationResult | null {
+  for (const r of records) {
+    if (
+      !r ||
+      typeof r.id !== 'string' ||
+      r.id.length === 0 ||
+      (r.mimeType !== 'image/webp' && r.mimeType !== 'image/jpeg') ||
+      !r.fullBlob ||
+      r.fullBlob.size <= 0 ||
+      !r.thumbnailBlob ||
+      r.thumbnailBlob.size <= 0
+    ) {
+      return {
+        success: false,
+        error: 'invalid-data',
+        message: '写真データの形式が不正なため保存を停止しました。',
+      };
+    }
+  }
+  return null;
+}
+
+interface PendingStateMutation {
+  state: LocalAppState;
+  newPhotos?: StoredPhotoRecord[];
+  pruneOrphans?: boolean;
+  bumpRevision?: boolean;
+}
+
 function enqueueStateUpdate(
-  mutator: (prev: LocalAppState) => LocalAppState | StorageOperationResult
+  mutator: (prev: LocalAppState) => PendingStateMutation | LocalAppState | StorageOperationResult
 ): Promise<StorageOperationResult> {
   const task = operationQueue
     .then(async (): Promise<StorageOperationResult> => {
@@ -419,11 +464,17 @@ function enqueueStateUpdate(
       }
       const next = mutator(state);
       if ('success' in next) return next;
-      const bumped: LocalAppState = {
-        ...next,
-        revision: Math.max(state.revision + 1, Date.now()),
+      const mutation: PendingStateMutation =
+        'state' in next ? next : { state: next, pruneOrphans: true, bumpRevision: true };
+      const shouldBump = mutation.bumpRevision !== false;
+      const committedState: LocalAppState = {
+        ...mutation.state,
+        revision: shouldBump ? Math.max(state.revision + 1, Date.now()) : mutation.state.revision,
       };
-      return commitStateToDb(bumped);
+      return commitStateToDb(committedState, {
+        newPhotos: mutation.newPhotos,
+        pruneOrphans: mutation.pruneOrphans,
+      });
     })
     .catch((): StorageOperationResult => ({
       success: false,
@@ -445,8 +496,33 @@ export function saveSpots(spots: VisitSpot[]): Promise<StorageOperationResult> {
     const invalid = validateSpotsForWrite(spots);
     if (invalid) return invalid;
     return {
-      ...state,
-      spots: cloneSpots(spots),
+      state: {
+        ...state,
+        spots: cloneSpots(spots),
+      },
+      pruneOrphans: true,
+      bumpRevision: true,
+    };
+  });
+}
+
+export function saveSpotsWithPhotosAtomic(
+  spots: VisitSpot[],
+  newPhotos: StoredPhotoRecord[]
+): Promise<StorageOperationResult> {
+  return enqueueStateUpdate((state) => {
+    const invalidSpots = validateSpotsForWrite(spots);
+    if (invalidSpots) return invalidSpots;
+    const invalidPhotos = validateNewPhotosForWrite(newPhotos);
+    if (invalidPhotos) return invalidPhotos;
+    return {
+      state: {
+        ...state,
+        spots: cloneSpots(spots),
+      },
+      newPhotos,
+      pruneOrphans: true,
+      bumpRevision: true,
     };
   });
 }
@@ -463,14 +539,18 @@ export function saveSpotsWithUndoAtomic(
     const invalidUndo = validateSpotsForWrite(undoSpots);
     if (invalidUndo) return invalidUndo;
     return {
-      ...state,
-      spots: cloneSpots(nextSpots),
-      undo: {
-        savedAt: new Date().toISOString(),
-        reason,
-        spots: cloneSpots(undoSpots),
+      state: {
+        ...state,
+        spots: cloneSpots(nextSpots),
+        undo: {
+          savedAt: new Date().toISOString(),
+          reason,
+          spots: cloneSpots(undoSpots),
+        },
+        driveSync: driveSyncPatch ? { ...state.driveSync, ...driveSyncPatch } : state.driveSync,
       },
-      driveSync: driveSyncPatch ? { ...state.driveSync, ...driveSyncPatch } : state.driveSync,
+      pruneOrphans: true,
+      bumpRevision: true,
     };
   });
 }
@@ -487,9 +567,57 @@ export function restoreUndoSnapshot(): Promise<StorageOperationResult> {
     const invalid = validateSpotsForWrite(state.undo.spots);
     if (invalid) return invalid;
     return {
-      ...state,
-      spots: cloneSpots(state.undo.spots),
-      undo: null,
+      state: {
+        ...state,
+        spots: cloneSpots(state.undo.spots),
+        undo: null,
+      },
+      pruneOrphans: true,
+      bumpRevision: true,
+    };
+  });
+}
+
+export function patchPhotoDriveFileIds(
+  updates: Record<string, string>
+): Promise<StorageOperationResult> {
+  return enqueueStateUpdate((state) => {
+    const keys = Object.keys(updates);
+    if (keys.length === 0) {
+      return { success: true, state };
+    }
+    let changed = false;
+    const nextSpots = state.spots.map((spot) => {
+      let spotChanged = false;
+      const nextEntries = spot.entries.map((entry) => {
+        let entryChanged = false;
+        const nextPhotos = entry.photos.map((photo) => {
+          const nextDriveId = updates[photo.id];
+          if (nextDriveId && photo.driveFileId !== nextDriveId) {
+            entryChanged = true;
+            return { ...photo, driveFileId: nextDriveId };
+          }
+          return photo;
+        });
+        if (!entryChanged) return entry;
+        spotChanged = true;
+        return { ...entry, photos: nextPhotos };
+      });
+      if (!spotChanged) return spot;
+      changed = true;
+      return { ...spot, entries: nextEntries };
+    });
+
+    if (!changed) {
+      return { success: true, state };
+    }
+    return {
+      state: {
+        ...state,
+        spots: nextSpots,
+      },
+      pruneOrphans: false,
+      bumpRevision: false,
     };
   });
 }
@@ -535,7 +663,7 @@ export async function readRawRecoveryData(): Promise<unknown> {
   if (!db) return { error: 'IndexedDB unavailable' };
   try {
     const primary = await dbRead(db, STORE_APP_STATE, PRIMARY_KEY);
-    return { dbName: DB_NAME, store: STORE_APP_STATE, primary: primary ?? null };
+    return { dbName: VISIT_DB_NAME, store: STORE_APP_STATE, primary: primary ?? null };
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Failed to read raw data' };
   } finally {

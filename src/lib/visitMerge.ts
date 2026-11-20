@@ -2,6 +2,7 @@ import {
   MAX_BACKUP_FILE_BYTES,
   MAX_ENTRIES_PER_SPOT,
   MAX_MEMO_LENGTH,
+  MAX_PHOTOS_PER_ENTRY,
   MAX_SPOT_NAME_LENGTH,
   MAX_SPOTS,
   type PhotoAttachment,
@@ -15,6 +16,7 @@ import {
 import { getSpotCategoryMeta, isSpotCategory } from './spotCategories';
 import {
   cloneSpots,
+  collectReferencedPhotoIds,
   createUuid,
   deriveSpotStatus,
   hasControlCharacters,
@@ -22,6 +24,7 @@ import {
   isValidPhotoAttachment,
   sanitizeAddressSummary,
   sanitizeMemo,
+  sanitizePhotoCaption,
   sanitizeSpotName,
 } from './spotDomain';
 import { getVisitDateRange, normalizeVisitDate } from './visitDate';
@@ -29,6 +32,7 @@ import { getVisitDateRange, normalizeVisitDate } from './visitDate';
 export const BACKUP_APP_ID = '3d-visit-record';
 export const BACKUP_KIND = 'visit-records';
 export const BACKUP_SCHEMA_VERSION = 1;
+export const PHOTO_SYNC_VERSION = 2 as const;
 
 export type ImportMode = 'merge' | 'replace';
 export type DetectedBackupFormat = 'visit-record' | 'rain-viewer';
@@ -49,6 +53,8 @@ export interface MergePreview {
   removed: number;
   truncatedSpots: number;
   truncatedEntries: number;
+  photosAdded: number;
+  photosRemoved: number;
 }
 
 function toTimestamp(iso?: string): number {
@@ -93,11 +99,21 @@ function sanitizeEntry(raw: unknown, fallbackIso: string): VisitEntry {
     if (!Array.isArray(e.photos)) {
       throw new VisitTransferError('写真メタデータの形式が不正です。');
     }
-    for (const p of e.photos) {
+    const seenPhotoIds = new Set<string>();
+    for (const p of e.photos.slice(0, MAX_PHOTOS_PER_ENTRY)) {
       if (!isValidPhotoAttachment(p)) {
         throw new VisitTransferError('写真メタデータに不正な項目が含まれています。');
       }
-      photos.push({ ...p });
+      if (seenPhotoIds.has(p.id)) continue;
+      seenPhotoIds.add(p.id);
+      const caption = sanitizePhotoCaption(p.caption);
+      const cleanPhoto: PhotoAttachment = { ...p };
+      if (caption !== undefined) {
+        cleanPhoto.caption = caption;
+      } else {
+        delete cleanPhoto.caption;
+      }
+      photos.push(cleanPhoto);
     }
   }
 
@@ -318,7 +334,12 @@ export function detectBackupFormat(text: string): DetectedBackupFormat {
 export function parseBackupJson(
   text: string,
   options?: { rainViewerImportStatus?: SpotStatus }
-): { format: DetectedBackupFormat; items: VisitSpot[]; revision?: number } {
+): {
+  format: DetectedBackupFormat;
+  items: VisitSpot[];
+  revision?: number;
+  photoSyncVersion?: number;
+} {
   const byteLength = new TextEncoder().encode(text).byteLength;
   if (byteLength > MAX_BACKUP_FILE_BYTES) {
     throw new VisitTransferError('ファイルサイズが大きすぎます（上限 16MB）。');
@@ -381,8 +402,14 @@ export function parseBackupJson(
   const items = obj.items.map(sanitizeVisitSpot);
   const revision =
     typeof obj.revision === 'number' && Number.isSafeInteger(obj.revision) ? obj.revision : undefined;
+  const photoSyncVersion =
+    typeof obj.photoSyncVersion === 'number' &&
+    Number.isSafeInteger(obj.photoSyncVersion) &&
+    obj.photoSyncVersion > 0
+      ? obj.photoSyncVersion
+      : undefined;
 
-  return { format: 'visit-record', items, revision };
+  return { format: 'visit-record', items, revision, photoSyncVersion };
 }
 
 function sortEntriesDescending(entries: VisitEntry[]): VisitEntry[] {
@@ -396,7 +423,8 @@ function sortEntriesDescending(entries: VisitEntry[]): VisitEntry[] {
 
 function mergeEntries(
   existingEntries: VisitEntry[],
-  incomingEntries: VisitEntry[]
+  incomingEntries: VisitEntry[],
+  respectEmptyIncomingPhotos = false
 ): { entries: VisitEntry[]; addedCount: number; updatedCount: number; truncatedCount: number } {
   const byId = new Map<string, VisitEntry>();
   for (const e of existingEntries) {
@@ -415,7 +443,11 @@ function mergeEntries(
       byId.set(inc.id, {
         ...inc,
         date: { ...inc.date },
-        photos: inc.photos.length > 0 ? inc.photos.map((p) => ({ ...p })) : prev.photos,
+        photos: respectEmptyIncomingPhotos
+          ? inc.photos.map((p) => ({ ...p }))
+          : inc.photos.length > 0
+            ? inc.photos.map((p) => ({ ...p }))
+            : prev.photos,
         createdAt: prev.createdAt,
       });
       updatedCount++;
@@ -440,7 +472,27 @@ function findDuplicateSpotIndex(list: VisitSpot[], target: VisitSpot): number {
   );
 }
 
-function dedupeIncomingSpots(items: VisitSpot[]): VisitSpot[] {
+function diffPhotoCounts(
+  current: VisitSpot[],
+  next: VisitSpot[]
+): { photosAdded: number; photosRemoved: number } {
+  const prevIds = collectReferencedPhotoIds(current);
+  const nextIds = collectReferencedPhotoIds(next);
+  let photosAdded = 0;
+  let photosRemoved = 0;
+  for (const id of nextIds) {
+    if (!prevIds.has(id)) photosAdded++;
+  }
+  for (const id of prevIds) {
+    if (!nextIds.has(id)) photosRemoved++;
+  }
+  return { photosAdded, photosRemoved };
+}
+
+function dedupeIncomingSpots(
+  items: VisitSpot[],
+  respectEmptyIncomingPhotos = false
+): VisitSpot[] {
   const result: VisitSpot[] = [];
   for (const item of items) {
     const idx = findDuplicateSpotIndex(result, item);
@@ -448,7 +500,7 @@ function dedupeIncomingSpots(items: VisitSpot[]): VisitSpot[] {
       result.push(cloneSpots([item])[0]);
     } else {
       const existing = result[idx];
-      const merged = mergeEntries(existing.entries, item.entries);
+      const merged = mergeEntries(existing.entries, item.entries, respectEmptyIncomingPhotos);
       const newer =
         toTimestamp(item.updatedAt) > toTimestamp(existing.updatedAt) ? item : existing;
       result[idx] = {
@@ -465,9 +517,11 @@ function dedupeIncomingSpots(items: VisitSpot[]): VisitSpot[] {
 export function previewMerge(
   current: VisitSpot[],
   incomingRaw: VisitSpot[],
-  mode: ImportMode
+  mode: ImportMode,
+  options?: { photoSyncVersion?: number }
 ): MergePreview {
-  const incoming = dedupeIncomingSpots(incomingRaw);
+  const respectEmptyIncomingPhotos = (options?.photoSyncVersion ?? 0) >= 2;
+  const incoming = dedupeIncomingSpots(incomingRaw, respectEmptyIncomingPhotos);
 
   if (mode === 'replace') {
     const next = incoming.slice(0, MAX_SPOTS);
@@ -487,6 +541,7 @@ export function previewMerge(
       }
     }
     const keptCount = next.filter((item) => findDuplicateSpotIndex(current, item) >= 0).length;
+    const { photosAdded, photosRemoved } = diffPhotoCounts(current, next);
     return {
       next,
       added,
@@ -496,6 +551,8 @@ export function previewMerge(
       removed: Math.max(0, current.length - keptCount),
       truncatedSpots: Math.max(0, incoming.length - next.length),
       truncatedEntries: 0,
+      photosAdded,
+      photosRemoved,
     };
   }
 
@@ -514,7 +571,7 @@ export function previewMerge(
     }
 
     const existing = merged[idx];
-    const entryMerge = mergeEntries(existing.entries, item.entries);
+    const entryMerge = mergeEntries(existing.entries, item.entries, respectEmptyIncomingPhotos);
     truncatedEntries += entryMerge.truncatedCount;
     entriesAdded += entryMerge.addedCount;
 
@@ -545,8 +602,11 @@ export function previewMerge(
   const acceptedNew = newSpots.slice(0, room);
   for (const s of acceptedNew) entriesAdded += s.entries.length;
 
+  const next = [...acceptedNew, ...merged];
+  const { photosAdded, photosRemoved } = diffPhotoCounts(current, next);
+
   return {
-    next: [...acceptedNew, ...merged],
+    next,
     added: acceptedNew.length,
     updated,
     entriesAdded,
@@ -554,6 +614,8 @@ export function previewMerge(
     removed: 0,
     truncatedSpots: Math.max(0, newSpots.length - acceptedNew.length),
     truncatedEntries,
+    photosAdded,
+    photosRemoved,
   };
 }
 
@@ -562,6 +624,7 @@ export function buildBackupEnvelope(spots: VisitSpot[], revision = 1): VisitBack
     app: BACKUP_APP_ID,
     kind: BACKUP_KIND,
     schemaVersion: BACKUP_SCHEMA_VERSION,
+    photoSyncVersion: PHOTO_SYNC_VERSION,
     exportedAt: new Date().toISOString(),
     revision,
     count: spots.length,

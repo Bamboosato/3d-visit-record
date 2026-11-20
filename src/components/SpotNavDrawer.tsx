@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Calendar,
+  Camera,
   CheckCircle2,
   Clock,
   Compass,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-react';
 import type {
   InspectedPoint,
+  PhotoAttachment,
   PresetMountain,
   SpotCategory,
   StatusFilterValue,
@@ -26,6 +28,7 @@ import {
   matchesStatusFilter,
   getSpotSortDateKey,
 } from '../lib/spotDomain';
+import { usePhotoObjectUrl } from '../lib/photoUrlCache';
 import {
   doesVisitDateOverlapYear,
   extractDistinctYears,
@@ -46,16 +49,73 @@ interface SpotNavDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   spots: VisitSpot[];
+  photoCacheVersion?: number;
   referenceLocation?: SearchReferenceLocation;
   onSelectSpot: (spot: VisitSpot) => void;
   onSelectSearchLocation: (point: InspectedPoint, zoom: number) => void;
   onSelectMountain: (mountain: PresetMountain, matchedSpot: VisitSpot | null) => void;
 }
 
+function getSpotPhotoSummary(spot: VisitSpot): {
+  coverPhoto: PhotoAttachment | null;
+  totalPhotoCount: number;
+} {
+  let coverPhoto: PhotoAttachment | null = null;
+  let totalPhotoCount = 0;
+  for (const entry of spot.entries) {
+    if (entry.photos.length > 0) {
+      if (!coverPhoto) coverPhoto = entry.photos[0];
+      totalPhotoCount += entry.photos.length;
+    }
+  }
+  return { coverPhoto, totalPhotoCount };
+}
+
+function matchesSpotKeyword(spot: VisitSpot, q: string): boolean {
+  if (spot.name.toLowerCase().includes(q)) return true;
+  if (spot.addressSummary?.toLowerCase().includes(q)) return true;
+  return spot.entries.some(
+    (e) =>
+      e.memo.toLowerCase().includes(q) ||
+      e.photos.some((p) => p.caption?.toLowerCase().includes(q) ?? false)
+  );
+}
+
+const SpotCardVisual: React.FC<{
+  spot: VisitSpot;
+  coverPhotoId: string | undefined;
+  photoCacheVersion: number;
+}> = ({ spot, coverPhotoId, photoCacheVersion }) => {
+  const catMeta = getSpotCategoryMeta(spot.category);
+  const CatIcon = catMeta.icon;
+  const { url } = usePhotoObjectUrl(coverPhotoId, 'thumb', photoCacheVersion);
+
+  if (url) {
+    return (
+      <img
+        src={url}
+        alt={spot.name}
+        loading="lazy"
+        decoding="async"
+        className="mt-0.5 w-11 h-11 rounded-xl object-cover shrink-0 border border-slate-700/80 bg-slate-900"
+      />
+    );
+  }
+
+  return (
+    <span
+      className={`mt-0.5 w-8 h-8 rounded-full flex items-center justify-center shrink-0 border ${catMeta.badgeBgClass}`}
+    >
+      <CatIcon className="w-4 h-4" aria-hidden="true" />
+    </span>
+  );
+};
+
 export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
   isOpen,
   onClose,
   spots,
+  photoCacheVersion = 0,
   referenceLocation,
   onSelectSpot,
   onSelectSearchLocation,
@@ -109,11 +169,8 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
         const y = Number(yearFilter);
         if (!spot.entries.some((e) => doesVisitDateOverlapYear(e.date, y))) return false;
       }
-      if (q) {
-        const nameHit = spot.name.toLowerCase().includes(q);
-        const addrHit = spot.addressSummary?.toLowerCase().includes(q) ?? false;
-        const memoHit = spot.entries.some((e) => e.memo.toLowerCase().includes(q));
-        if (!nameHit && !addrHit && !memoHit) return false;
+      if (q && !matchesSpotKeyword(spot, q)) {
+        return false;
       }
       return true;
     });
@@ -150,14 +207,7 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
   const matchingLocalSpotsForSearch = useMemo(() => {
     const q = submittedQuery.trim().toLowerCase();
     if (!q) return [];
-    return spots
-      .filter(
-        (s) =>
-          s.name.toLowerCase().includes(q) ||
-          (s.addressSummary?.toLowerCase().includes(q) ?? false) ||
-          s.entries.some((e) => e.memo.toLowerCase().includes(q))
-      )
-      .slice(0, 5);
+    return spots.filter((s) => matchesSpotKeyword(s, q)).slice(0, 5);
   }, [spots, submittedQuery]);
 
   // 百名山マッチングと達成数
@@ -383,10 +433,10 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
 
                 <input
                   type="search"
-                  aria-label="地点名・住所・メモで絞り込み"
+                  aria-label="地点名・住所・メモ・写真キャプションで絞り込み"
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
-                  placeholder="地点名・地名・メモを絞り込み..."
+                  placeholder="地点名・地名・メモ・写真キャプションを絞り込み..."
                   className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-base sm:text-xs text-white placeholder:text-slate-500"
                 />
               </div>
@@ -400,9 +450,8 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
               ) : (
                 <ul className="space-y-2">
                   {filteredSpots.map((spot) => {
-                    const catMeta = getSpotCategoryMeta(spot.category);
-                    const CatIcon = catMeta.icon;
                     const latestEntry = spot.entries[0];
+                    const { coverPhoto, totalPhotoCount } = getSpotPhotoSummary(spot);
                     const dist = referenceLocation
                       ? calcDistanceMeters(
                           referenceLocation.lat,
@@ -421,11 +470,11 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
                           }}
                           className="w-full text-left p-3 rounded-xl bg-slate-950/70 hover:bg-slate-800/80 border border-slate-800 hover:border-sky-400/60 transition-colors flex items-start gap-2.5 cursor-pointer"
                         >
-                          <span
-                            className={`mt-0.5 w-8 h-8 rounded-full flex items-center justify-center shrink-0 border ${catMeta.badgeBgClass}`}
-                          >
-                            <CatIcon className="w-4 h-4" aria-hidden="true" />
-                          </span>
+                          <SpotCardVisual
+                            spot={spot}
+                            coverPhotoId={coverPhoto?.id}
+                            photoCacheVersion={photoCacheVersion}
+                          />
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-1.5 min-w-0">
@@ -459,6 +508,12 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
                                 <span className="inline-flex items-center gap-1 text-slate-300">
                                   <Calendar className="w-3 h-3 text-sky-400" aria-hidden="true" />
                                   {formatVisitDate(latestEntry.date)}
+                                </span>
+                              )}
+                              {totalPhotoCount > 0 && (
+                                <span className="inline-flex items-center gap-0.5 text-sky-300 font-semibold">
+                                  <Camera className="w-3 h-3" aria-hidden="true" />
+                                  <span>{totalPhotoCount}</span>
                                 </span>
                               )}
                               {dist !== undefined && <span>{formatDistanceLabel(dist)}</span>}

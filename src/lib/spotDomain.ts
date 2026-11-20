@@ -2,6 +2,8 @@ import {
   MAX_ADDRESS_SUMMARY_LENGTH,
   MAX_ENTRIES_PER_SPOT,
   MAX_MEMO_LENGTH,
+  MAX_PHOTO_CAPTION_LENGTH,
+  MAX_PHOTOS_PER_ENTRY,
   MAX_SPOT_NAME_LENGTH,
   SAME_COORDINATE_TOLERANCE_DEG,
   type PhotoAttachment,
@@ -54,6 +56,20 @@ export function sanitizeAddressSummary(raw?: string): string | undefined {
   if (!raw) return undefined;
   const cleaned = raw.replace(/\s+/g, ' ').trim();
   return cleaned ? cleaned.slice(0, MAX_ADDRESS_SUMMARY_LENGTH) : undefined;
+}
+
+export function sanitizePhotoCaption(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  return cleaned || undefined;
+}
+
+export function isValidPhotoFileName(fileName: string): boolean {
+  if (typeof fileName !== 'string') return false;
+  if (fileName.length === 0 || fileName.length > 255) return false;
+  if (hasControlCharacters(fileName, false)) return false;
+  if (fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) return false;
+  return fileName.trim().length > 0;
 }
 
 /**
@@ -120,17 +136,75 @@ export function matchHyakumeizanSpot(
 export function isValidPhotoAttachment(raw: unknown): raw is PhotoAttachment {
   if (!raw || typeof raw !== 'object') return false;
   const p = raw as Partial<PhotoAttachment>;
-  if (typeof p.id !== 'string' || p.id.length === 0 || p.id.length > 100) return false;
-  if (typeof p.fileName !== 'string' || p.fileName.length === 0 || p.fileName.length > 255) return false;
+  if (typeof p.id !== 'string' || !/^[\w.-]{1,80}$/.test(p.id)) return false;
+  if (typeof p.fileName !== 'string' || !isValidPhotoFileName(p.fileName)) return false;
   if (p.mimeType !== 'image/webp' && p.mimeType !== 'image/jpeg') return false;
-  if (!Number.isFinite(p.width) || (p.width ?? 0) <= 0) return false;
-  if (!Number.isFinite(p.height) || (p.height ?? 0) <= 0) return false;
-  if (!Number.isFinite(p.bytes) || (p.bytes ?? 0) <= 0) return false;
-  if (p.caption !== undefined && (typeof p.caption !== 'string' || p.caption.length > 500)) return false;
-  if (p.takenAt !== undefined && (typeof p.takenAt !== 'string' || !Number.isFinite(Date.parse(p.takenAt)))) {
+  if (typeof p.width !== 'number' || !Number.isFinite(p.width) || p.width <= 0) return false;
+  if (typeof p.height !== 'number' || !Number.isFinite(p.height) || p.height <= 0) return false;
+  if (typeof p.bytes !== 'number' || !Number.isFinite(p.bytes) || p.bytes <= 0) return false;
+  if (
+    p.caption !== undefined &&
+    (typeof p.caption !== 'string' ||
+      p.caption.length > MAX_PHOTO_CAPTION_LENGTH ||
+      hasControlCharacters(p.caption, false))
+  ) {
+    return false;
+  }
+  if (
+    p.takenAt !== undefined &&
+    (typeof p.takenAt !== 'string' || p.takenAt.length > 64 || !Number.isFinite(Date.parse(p.takenAt)))
+  ) {
+    return false;
+  }
+  if (
+    p.driveFileId !== undefined &&
+    (typeof p.driveFileId !== 'string' ||
+      p.driveFileId.length === 0 ||
+      p.driveFileId.length > 200 ||
+      hasControlCharacters(p.driveFileId, false))
+  ) {
+    return false;
+  }
+  if (
+    p.checksumSha256 !== undefined &&
+    (typeof p.checksumSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(p.checksumSha256))
+  ) {
     return false;
   }
   return true;
+}
+
+export function collectReferencedPhotoIds(spots: VisitSpot[]): Set<string> {
+  const ids = new Set<string>();
+  for (const spot of spots) {
+    for (const entry of spot.entries) {
+      for (const photo of entry.photos) {
+        ids.add(photo.id);
+      }
+    }
+  }
+  return ids;
+}
+
+export function countTotalPhotos(spots: VisitSpot[]): number {
+  let total = 0;
+  for (const spot of spots) {
+    for (const entry of spot.entries) {
+      total += entry.photos.length;
+    }
+  }
+  return total;
+}
+
+export function hasUnuploadedPhotos(spots: VisitSpot[]): boolean {
+  for (const spot of spots) {
+    for (const entry of spot.entries) {
+      for (const photo of entry.photos) {
+        if (!photo.driveFileId) return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function isValidVisitEntry(raw: unknown): raw is VisitEntry {
@@ -141,7 +215,14 @@ export function isValidVisitEntry(raw: unknown): raw is VisitEntry {
   if (!isValidVisitDate(e.date)) return false;
   if (typeof e.memo !== 'string' || e.memo.length > MAX_MEMO_LENGTH) return false;
   if (hasControlCharacters(e.memo, true)) return false;
-  if (!Array.isArray(e.photos) || !e.photos.every(isValidPhotoAttachment)) return false;
+  if (
+    !Array.isArray(e.photos) ||
+    e.photos.length > MAX_PHOTOS_PER_ENTRY ||
+    !e.photos.every(isValidPhotoAttachment)
+  ) {
+    return false;
+  }
+  if (new Set(e.photos.map((p) => p.id)).size !== e.photos.length) return false;
   if (typeof e.createdAt !== 'string' || !Number.isFinite(Date.parse(e.createdAt))) return false;
   if (typeof e.updatedAt !== 'string' || !Number.isFinite(Date.parse(e.updatedAt))) return false;
   return true;

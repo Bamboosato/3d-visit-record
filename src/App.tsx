@@ -28,20 +28,25 @@ import {
   loadAppState,
   loadUiPreferences,
   markLocalExportTimestamp,
+  patchPhotoDriveFileIds,
   requestPersistentStorage,
   restoreUndoSnapshot,
   saveSpots,
+  saveSpotsWithPhotosAtomic,
   saveSpotsWithUndoAtomic,
   saveUiPreferences,
   updateDriveSyncMeta,
   type StorageOperationResult,
 } from './lib/visitStorage';
 import {
+  collectReferencedPhotoIds,
   createUuid,
   deriveSpotStatus,
+  hasUnuploadedPhotos,
   isSameCoordinate,
   matchesStatusFilter,
 } from './lib/spotDomain';
+import { invalidatePhotoUrl } from './lib/photoUrlCache';
 import { HYAKUMEIZAN_PRESETS } from './lib/hyakumeizanData';
 import { calcDistanceMeters } from './lib/osmPlaceClient';
 import {
@@ -59,11 +64,13 @@ import {
   type DriveSyncMeta,
   type InspectedPoint,
   type LocalAppState,
+  type PhotoAttachment,
   type PresetMountain,
   type SpotCamera,
   type SpotCategory,
   type SpotStatus,
   type StatusFilterValue,
+  type StoredPhotoRecord,
   type VisitEntry,
   type VisitSpot,
   type WebGPUStatus,
@@ -148,6 +155,7 @@ export const App: React.FC = () => {
   const [isLocating, setIsLocating] = useState(false);
   const [isMapLoading, setIsMapLoading] = useState(true);
   const [toastText, setToastText] = useState<string | null>(null);
+  const [photoCacheVersion, setPhotoCacheVersion] = useState(0);
 
   const mapRef = useRef<maplibregl.Map | null>(null);
   const cameraSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -243,11 +251,12 @@ export const App: React.FC = () => {
 
   const hasUnsavedDriveChanges = useMemo(() => {
     if (appState.spots.length === 0 && appState.driveSync.lastSyncedRevision === null) return false;
+    if (hasUnuploadedPhotos(appState.spots)) return true;
     return (
       appState.driveSync.lastSyncedRevision === null ||
       appState.revision > appState.driveSync.lastSyncedRevision
     );
-  }, [appState.spots.length, appState.revision, appState.driveSync.lastSyncedRevision]);
+  }, [appState.spots, appState.revision, appState.driveSync.lastSyncedRevision]);
 
   const referenceLocation = useMemo(() => {
     const center = mapRef.current?.getCenter();
@@ -448,20 +457,51 @@ export const App: React.FC = () => {
     );
   }, [isLocating, appState.spots, flyTo, handleSelectSpot, showToast]);
 
+  const syncPhotoCacheAfterSpotsChange = useCallback(
+    (prevSpots: VisitSpot[], nextSpots: VisitSpot[]) => {
+      const prevIds = collectReferencedPhotoIds(prevSpots);
+      const nextIds = collectReferencedPhotoIds(nextSpots);
+      let changed = false;
+      for (const id of prevIds) {
+        if (!nextIds.has(id)) {
+          invalidatePhotoUrl(id);
+          changed = true;
+        }
+      }
+      for (const id of nextIds) {
+        if (!prevIds.has(id)) {
+          changed = true;
+        }
+      }
+      if (changed) {
+        setPhotoCacheVersion((v) => v + 1);
+      }
+    },
+    []
+  );
+
   const commitSpots = useCallback(
-    async (nextSpots: VisitSpot[]): Promise<StorageOperationResult> => {
-      const res = await saveSpots(nextSpots);
+    async (
+      nextSpots: VisitSpot[],
+      newPhotoRecords?: StoredPhotoRecord[]
+    ): Promise<StorageOperationResult> => {
+      const prevSpots = appState.spots;
+      const res =
+        newPhotoRecords && newPhotoRecords.length > 0
+          ? await saveSpotsWithPhotosAtomic(nextSpots, newPhotoRecords)
+          : await saveSpots(nextSpots);
       setStorageWarning(getVisitStorageWarning());
       setStorageBlocked(isVisitStorageBlocked());
       if (res.success && res.state) {
         setAppState(res.state);
+        syncPhotoCacheAfterSpotsChange(prevSpots, res.state.spots);
         requestPersistentStorage();
       } else if (res.message) {
         showToast(res.message);
       }
       return res;
     },
-    [showToast]
+    [appState.spots, showToast, syncPhotoCacheAfterSpotsChange]
   );
 
   const handleCreateSpot = useCallback(
@@ -473,6 +513,8 @@ export const App: React.FC = () => {
       kind: SpotStatus;
       date: VisitEntry['date'];
       memo: string;
+      photos?: PhotoAttachment[];
+      newPhotoRecords?: StoredPhotoRecord[];
     }) => {
       if (appState.spots.length >= MAX_SPOTS) {
         showToast(`登録上限（${MAX_SPOTS}件）に達しています。`);
@@ -503,7 +545,7 @@ export const App: React.FC = () => {
             kind: payload.kind,
             date: payload.date,
             memo: payload.memo,
-            photos: [],
+            photos: payload.photos ?? [],
             createdAt: now,
             updatedAt: now,
           },
@@ -512,7 +554,7 @@ export const App: React.FC = () => {
         updatedAt: now,
       };
 
-      const res = await commitSpots([newSpot, ...appState.spots]);
+      const res = await commitSpots([newSpot, ...appState.spots], payload.newPhotoRecords);
       if (res.success) {
         runViewTransition(() => {
           setInspectedPoint(null);
@@ -569,7 +611,16 @@ export const App: React.FC = () => {
   );
 
   const handleAddEntry = useCallback(
-    async (spotId: string, payload: { kind: SpotStatus; date: VisitEntry['date']; memo: string }) => {
+    async (
+      spotId: string,
+      payload: {
+        kind: SpotStatus;
+        date: VisitEntry['date'];
+        memo: string;
+        photos?: PhotoAttachment[];
+        newPhotoRecords?: StoredPhotoRecord[];
+      }
+    ) => {
       const target = appState.spots.find((s) => s.id === spotId);
       if (!target) return;
       if (target.entries.length >= MAX_ENTRIES_PER_SPOT) {
@@ -582,7 +633,7 @@ export const App: React.FC = () => {
         kind: payload.kind,
         date: payload.date,
         memo: payload.memo,
-        photos: [],
+        photos: payload.photos ?? [],
         createdAt: now,
         updatedAt: now,
       };
@@ -597,7 +648,7 @@ export const App: React.FC = () => {
             }
           : s
       );
-      const res = await commitSpots(next);
+      const res = await commitSpots(next, payload.newPhotoRecords);
       if (res.success) showToast('記録を追加しました。');
     },
     [appState.spots, commitSpots, showToast]
@@ -607,7 +658,13 @@ export const App: React.FC = () => {
     async (
       spotId: string,
       entryId: string,
-      payload: { kind: SpotStatus; date: VisitEntry['date']; memo: string }
+      payload: {
+        kind: SpotStatus;
+        date: VisitEntry['date'];
+        memo: string;
+        photos?: PhotoAttachment[];
+        newPhotoRecords?: StoredPhotoRecord[];
+      }
     ) => {
       const now = new Date().toISOString();
       const next = appState.spots.map((s) => {
@@ -615,7 +672,14 @@ export const App: React.FC = () => {
         const nextEntries = sortEntries(
           s.entries.map((e) =>
             e.id === entryId
-              ? { ...e, kind: payload.kind, date: payload.date, memo: payload.memo, updatedAt: now }
+              ? {
+                  ...e,
+                  kind: payload.kind,
+                  date: payload.date,
+                  memo: payload.memo,
+                  photos: payload.photos ?? e.photos,
+                  updatedAt: now,
+                }
               : e
           )
         );
@@ -626,7 +690,7 @@ export const App: React.FC = () => {
           updatedAt: now,
         };
       });
-      const res = await commitSpots(next);
+      const res = await commitSpots(next, payload.newPhotoRecords);
       if (res.success) showToast('記録を更新しました。');
     },
     [appState.spots, commitSpots, showToast]
@@ -683,12 +747,22 @@ export const App: React.FC = () => {
     if (res.success && res.state) setAppState(res.state);
   }, []);
 
+  const handlePhotoDriveIdsUpdated = useCallback(async (updates: Record<string, string>) => {
+    const res = await patchPhotoDriveFileIds(updates);
+    if (res.success && res.state) setAppState(res.state);
+  }, []);
+
+  const handlePhotoCacheUpdated = useCallback(() => {
+    setPhotoCacheVersion((v) => v + 1);
+  }, []);
+
   const handleApplyImportedSpots = useCallback(
     async (options: {
       nextSpots: VisitSpot[];
       reason: 'drive-restore' | 'json-import';
       driveSyncPatch?: Partial<DriveSyncMeta>;
     }) => {
+      const prevSpots = appState.spots;
       const res = await saveSpotsWithUndoAtomic(
         options.nextSpots,
         appState.spots,
@@ -699,23 +773,26 @@ export const App: React.FC = () => {
       setStorageBlocked(isVisitStorageBlocked());
       if (res.success && res.state) {
         setAppState(res.state);
+        syncPhotoCacheAfterSpotsChange(prevSpots, res.state.spots);
         if (selectedSpotId && !res.state.spots.some((s) => s.id === selectedSpotId)) {
           setSelectedSpotId(null);
         }
       }
       return res;
     },
-    [appState.spots, selectedSpotId]
+    [appState.spots, selectedSpotId, syncPhotoCacheAfterSpotsChange]
   );
 
   const handleUndoLastRestore = useCallback(async () => {
+    const prevSpots = appState.spots;
     const res = await restoreUndoSnapshot();
     if (res.success && res.state) {
       setAppState(res.state);
+      syncPhotoCacheAfterSpotsChange(prevSpots, res.state.spots);
       showToast('復元前の状態に戻しました。');
     }
     return res;
-  }, [showToast]);
+  }, [appState.spots, showToast, syncPhotoCacheAfterSpotsChange]);
 
   const handleLocalExportRecorded = useCallback(async (iso: string) => {
     const res = await markLocalExportTimestamp(iso);
@@ -993,6 +1070,7 @@ export const App: React.FC = () => {
         isOpen={isNavOpen}
         onClose={() => setIsNavOpen(false)}
         spots={appState.spots}
+        photoCacheVersion={photoCacheVersion}
         referenceLocation={referenceLocation}
         onSelectSpot={(spot) => handleSelectSpot(spot)}
         onSelectSearchLocation={handleSelectSearchLocation}
@@ -1004,6 +1082,8 @@ export const App: React.FC = () => {
         selectedSpot={selectedSpot}
         inspectedPoint={inspectedPoint}
         nearbyDuplicateSpot={nearbyDuplicateSpot}
+        photoCacheVersion={photoCacheVersion}
+        onPhotoCached={handlePhotoCacheUpdated}
         onClose={() =>
           runViewTransition(() => {
             setSelectedSpotId(null);
@@ -1032,6 +1112,8 @@ export const App: React.FC = () => {
         undoSnapshot={appState.undo}
         hasUnsavedDriveChanges={hasUnsavedDriveChanges}
         onUpdateDriveMeta={handleUpdateDriveMeta}
+        onPhotoDriveIdsUpdated={handlePhotoDriveIdsUpdated}
+        onPhotoCacheUpdated={handlePhotoCacheUpdated}
         onApplyImportedSpots={handleApplyImportedSpots}
         onUndoLastRestore={handleUndoLastRestore}
         onLocalExportRecorded={handleLocalExportRecorded}
