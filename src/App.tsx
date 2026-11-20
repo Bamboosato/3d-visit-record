@@ -2,8 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as maplibregl from 'maplibre-gl';
 import {
   AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
   Cloud,
   Compass,
+  Layers,
   Loader2,
   LocateFixed,
   Search,
@@ -128,7 +132,7 @@ export const App: React.FC = () => {
   const [selectedSpotId, setSelectedSpotId] = useState<string | null>(null);
   const [inspectedPoint, setInspectedPoint] = useState<InspectedPoint | null>(() => {
     const url = initialUrlStateRef.current;
-    if (!url) return null;
+    if (!url || !url.spotName) return null;
     return {
       lng: url.lng,
       lat: url.lat,
@@ -138,6 +142,7 @@ export const App: React.FC = () => {
   });
 
   const [isNavOpen, setIsNavOpen] = useState(false);
+  const [isFilterMenuOpen, setIsFilterMenuOpen] = useState(false);
   const [isLayerOpen, setIsLayerOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
@@ -176,7 +181,7 @@ export const App: React.FC = () => {
       setStorageBlocked(isVisitStorageBlocked());
 
       const url = initialUrlStateRef.current;
-      if (url) {
+      if (url && url.spotName) {
         const matched = loaded.spots.find((s) =>
           isSameCoordinate(s.center[0], s.center[1], url.lng, url.lat)
         );
@@ -190,6 +195,15 @@ export const App: React.FC = () => {
             }
           });
         }
+        replaceUrlViewState({
+          lat: url.lat,
+          lng: url.lng,
+          zoom: url.zoom,
+          pitch: url.pitch,
+          bearing: url.bearing,
+          baseMap: url.baseMap,
+          exaggeration: url.exaggeration,
+        });
       }
     });
     return () => {
@@ -272,27 +286,35 @@ export const App: React.FC = () => {
       cameraSyncTimerRef.current = setTimeout(() => {
         replaceUrlViewState({
           ...view,
-          spotName: selectedSpot?.name ?? inspectedPoint?.label,
           baseMap,
           exaggeration,
         });
       }, 300);
     },
-    [selectedSpot?.name, inspectedPoint?.label, baseMap, exaggeration]
+    [baseMap, exaggeration]
   );
 
   // Mutual exclusion helpers
   const openNav = () => {
+    setIsFilterMenuOpen(false);
     setIsLayerOpen(false);
     setIsSyncOpen(false);
     setIsNavOpen((prev) => !prev);
   };
+  const openFilterMenu = () => {
+    setIsNavOpen(false);
+    setIsLayerOpen(false);
+    setIsSyncOpen(false);
+    setIsFilterMenuOpen((prev) => !prev);
+  };
   const openLayer = () => {
+    setIsFilterMenuOpen(false);
     setIsNavOpen(false);
     setIsSyncOpen(false);
     setIsLayerOpen((prev) => !prev);
   };
   const openSync = () => {
+    setIsFilterMenuOpen(false);
     setIsNavOpen(false);
     setIsLayerOpen(false);
     setIsSyncOpen(true);
@@ -709,6 +731,42 @@ export const App: React.FC = () => {
     );
   }
 
+  const mobileFilterOptions: Array<{
+    id: StatusFilterValue;
+    label: string;
+    shortLabel: string;
+    count: number;
+    icon: React.ReactNode;
+    activeClass: string;
+  }> = [
+    {
+      id: 'all',
+      label: 'すべて',
+      shortLabel: 'すべて',
+      count: statusCounts.all,
+      icon: <Layers className="w-3.5 h-3.5 shrink-0 text-sky-400" aria-hidden="true" />,
+      activeClass: 'bg-sky-500/20 border-sky-400/60 text-white',
+    },
+    {
+      id: 'visited',
+      label: '訪問済み',
+      shortLabel: '訪問',
+      count: statusCounts.visited,
+      icon: <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" aria-hidden="true" />,
+      activeClass: 'bg-emerald-500/20 border-emerald-400/60 text-white',
+    },
+    {
+      id: 'planned',
+      label: '訪問予定',
+      shortLabel: '予定',
+      count: statusCounts.planned,
+      icon: <Clock className="w-3.5 h-3.5 shrink-0 text-amber-400" aria-hidden="true" />,
+      activeClass: 'bg-amber-500/20 border-amber-400/60 text-white',
+    },
+  ];
+  const activeMobileFilter =
+    mobileFilterOptions.find((opt) => opt.id === statusFilter) ?? mobileFilterOptions[0];
+
   return (
     <div className="app-viewport select-none">
       <MapViewer
@@ -726,20 +784,82 @@ export const App: React.FC = () => {
         mapInstanceRef={mapRef}
       />
 
-      {/* Top Header Bar: 左（タイトル＋フィルター統合ピル）＆ 右（連結ツールバー） */}
-      <header className="pointer-events-none fixed top-0 inset-x-0 z-30 safe-header-padding flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 gap-x-2 md:gap-x-0">
-        <div
-          title="3D Visit Record"
-          className="pointer-events-auto order-1 shrink-0 min-h-[38px] sm:min-h-[42px] whitespace-nowrap inline-flex items-center gap-1.5 pl-3 pr-3 md:pr-2.5 py-1 rounded-full md:rounded-r-none bg-slate-900/90 backdrop-blur-md border border-slate-700/80 md:border-r md:border-r-slate-700/80 shadow-lg"
-        >
-          <Compass className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
-          <span className="font-bold text-xs sm:text-sm tracking-tight text-white">
-            3D Visit
-          </span>
+      {/* Top Header Bar: 左（スマホ時はプルダウン統合タイトル / md以上はタイトル＋フィルター連結ピル）＆ 右（連結ツールバー） */}
+      <header className="pointer-events-none fixed top-0 inset-x-0 z-30 safe-header-padding flex items-center justify-between gap-2 md:gap-0">
+        {/* スマホ画面用：タイトル＋ステータスフィルター プルダウン */}
+        <div className="pointer-events-auto relative md:hidden shrink-0">
+          <button
+            type="button"
+            id="mobile-title-filter-btn"
+            onClick={openFilterMenu}
+            aria-expanded={isFilterMenuOpen}
+            aria-controls="mobile-filter-dropdown"
+            aria-label={`3D Visit 表示絞り込み（現在: ${activeMobileFilter.label} ${activeMobileFilter.count}件）`}
+            className="min-h-[38px] whitespace-nowrap inline-flex items-center gap-1.5 pl-2.5 pr-2.5 py-1 rounded-full bg-slate-900/90 hover:bg-slate-800/95 backdrop-blur-md border border-slate-700/80 shadow-lg text-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <Compass className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
+            <span className="font-bold text-xs tracking-tight text-white">3D Visit</span>
+            <span className="inline-flex items-center gap-1 pl-1.5 border-l border-slate-700/80 text-[11px] font-semibold text-slate-200">
+              {activeMobileFilter.icon}
+              <span className="hidden min-[380px]:inline">{activeMobileFilter.shortLabel}</span>
+              <span className="tabular-nums opacity-85">{activeMobileFilter.count}</span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
+                  isFilterMenuOpen ? 'rotate-180' : ''
+                }`}
+                aria-hidden="true"
+              />
+            </span>
+          </button>
+
+          {isFilterMenuOpen && (
+            <div
+              id="mobile-filter-dropdown"
+              role="menu"
+              aria-label="地図上のステータス絞り込み"
+              className="safe-top-left-dropdown fixed z-30 w-52 rounded-2xl bg-slate-900/95 backdrop-blur-md border border-slate-700/85 shadow-2xl p-1.5 space-y-1"
+            >
+              {mobileFilterOptions.map((opt) => {
+                const active = statusFilter === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    id={`mobile-status-filter-${opt.id}`}
+                    onClick={() => {
+                      setStatusFilter(opt.id);
+                      setIsFilterMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer ${
+                      active
+                        ? opt.activeClass
+                        : 'border-transparent text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      {opt.icon}
+                      <span>{opt.label}</span>
+                    </span>
+                    <span className="tabular-nums text-[11px] opacity-85">{opt.count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {/* Quick Status Filter Bar: md以上では左のタイトルと連結して1つの統合ピル、スマホでは2段目中央 */}
-        <div className="pointer-events-none order-3 basis-full flex justify-center md:order-2 md:basis-auto md:justify-start">
+        {/* PC・タブレット画面用：タイトルピル＋連結フィルターバー */}
+        <div
+          title="3D Visit Record"
+          className="pointer-events-auto hidden md:inline-flex shrink-0 min-h-[42px] whitespace-nowrap items-center gap-1.5 pl-3 pr-2.5 py-1 rounded-full rounded-r-none bg-slate-900/90 backdrop-blur-md border border-slate-700/80 border-r border-r-slate-700/80 shadow-lg"
+        >
+          <Compass className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
+          <span className="font-bold text-sm tracking-tight text-white">3D Visit</span>
+        </div>
+
+        <div className="hidden md:flex pointer-events-none">
           <StatusFilterBar
             value={statusFilter}
             onChange={setStatusFilter}
@@ -749,7 +869,7 @@ export const App: React.FC = () => {
         </div>
 
         {/* Right Connected Action Toolbar */}
-        <div className="pointer-events-auto order-2 md:order-3 md:ml-auto shrink-0 inline-flex items-center rounded-full bg-slate-900/95 border border-slate-700/80 shadow-lg divide-x divide-slate-700/70">
+        <div className="pointer-events-auto md:ml-auto shrink-0 inline-flex items-center rounded-full bg-slate-900/95 border border-slate-700/80 shadow-lg divide-x divide-slate-700/70">
           <button
             type="button"
             id="nav-toggle-btn"
@@ -844,11 +964,14 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Backdrop for LayerMenu */}
-      {isLayerOpen && (
+      {/* Backdrop for dropdown menus */}
+      {(isLayerOpen || isFilterMenuOpen) && (
         <div
           className="fixed inset-0 z-20 pointer-events-auto"
-          onClick={() => setIsLayerOpen(false)}
+          onClick={() => {
+            setIsLayerOpen(false);
+            setIsFilterMenuOpen(false);
+          }}
           aria-hidden="true"
         />
       )}

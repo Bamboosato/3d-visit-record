@@ -39,6 +39,29 @@
   }
 }
 
+.safe-top-left-dropdown {
+  top: calc(var(--safe-top) + 3.75rem);
+  left: calc(var(--safe-left) + 0.75rem);
+}
+
+@media (min-width: 640px) {
+  .safe-top-left-dropdown {
+    left: calc(var(--safe-left) + 1rem);
+  }
+}
+
+.safe-top-loading-badge {
+  top: calc(var(--safe-top) + 3.75rem);
+  right: calc(var(--safe-right) + 0.75rem);
+}
+
+@media (min-width: 640px) {
+  .safe-top-loading-badge {
+    top: calc(var(--safe-top) + 4.15rem);
+    right: calc(var(--safe-right) + 1rem);
+  }
+}
+
 @layer base {
   html,
   body {

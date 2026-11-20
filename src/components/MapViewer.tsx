@@ -504,7 +504,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       {isTilesLoading && (
         <div
           aria-live="polite"
-          className="pointer-events-none absolute top-20 right-4 z-10 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 backdrop-blur border border-slate-700/70 text-[11px] text-slate-300 shadow"
+          className="safe-top-loading-badge pointer-events-none fixed z-10 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/85 backdrop-blur-md border border-slate-700/70 text-[11px] text-slate-200 shadow-lg"
         >
           <Loader2 className="w-3 h-3 animate-spin text-sky-400" aria-hidden="true" />
           <span>3D地形読込中</span>
