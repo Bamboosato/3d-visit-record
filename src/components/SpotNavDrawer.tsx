@@ -230,7 +230,7 @@ export const SpotNavDrawer: React.FC<SpotNavDrawerProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-30 flex items-start justify-center pt-16 sm:pt-20 px-3 pb-4 pointer-events-auto">
+    <div className="fixed inset-0 z-40 flex items-start justify-center pt-16 sm:pt-20 px-3 pb-4 pointer-events-auto">
       <div
         className="fixed inset-0 bg-slate-950/60 backdrop-blur-[2px]"
         onClick={onClose}

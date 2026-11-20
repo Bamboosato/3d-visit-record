@@ -727,7 +727,7 @@ export const App: React.FC = () => {
       />
 
       {/* Top Header Bar: 左（タイトル＋フィルター統合ピル）＆ 右（連結ツールバー） */}
-      <header className="pointer-events-none fixed top-0 inset-x-0 z-20 safe-header-padding flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 gap-x-2 md:gap-x-0">
+      <header className="pointer-events-none fixed top-0 inset-x-0 z-30 safe-header-padding flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 gap-x-2 md:gap-x-0">
         <div
           title="3D Visit Record"
           className="pointer-events-auto order-1 shrink-0 min-h-[38px] sm:min-h-[42px] whitespace-nowrap inline-flex items-center gap-1.5 pl-3 pr-3 md:pr-2.5 py-1 rounded-full md:rounded-r-none bg-slate-900/90 backdrop-blur-md border border-slate-700/80 md:border-r md:border-r-slate-700/80 shadow-lg"
@@ -817,7 +817,7 @@ export const App: React.FC = () => {
       {storageWarning && (
         <div
           role="alert"
-          className="pointer-events-auto fixed top-28 left-1/2 -translate-x-1/2 z-30 max-w-md w-[92vw] p-3 rounded-xl bg-rose-950/95 border border-rose-500/70 text-xs text-rose-100 shadow-2xl flex items-center gap-2"
+          className="pointer-events-auto fixed top-28 left-1/2 -translate-x-1/2 z-40 max-w-md w-[92vw] p-3 rounded-xl bg-rose-950/95 border border-rose-500/70 text-xs text-rose-100 shadow-2xl flex items-center gap-2"
         >
           <AlertTriangle className="w-4 h-4 text-rose-300 shrink-0" aria-hidden="true" />
           <span className="flex-1">{storageWarning}</span>
@@ -838,7 +838,7 @@ export const App: React.FC = () => {
         <div
           role="status"
           aria-live="polite"
-          className="pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-slate-900/95 border border-sky-400/60 text-xs font-semibold text-white shadow-xl"
+          className="pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-slate-900/95 border border-sky-400/60 text-xs font-semibold text-white shadow-xl"
         >
           {toastText}
         </div>

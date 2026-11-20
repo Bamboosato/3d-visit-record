@@ -259,9 +259,21 @@ test.describe('3D Visit Record core E2E flows', () => {
     await expect(page.getByRole('heading', { level: 1, name: /利用規約/ })).toBeVisible();
     await page.getByRole('button', { name: '地図アプリに戻る' }).click();
 
-    // 2. Main app loads & status filter shows 0
+    // 2. Main app loads & status filter shows 0, and LayerMenu policy links work
     await expect(page.locator('#visit-map-container')).toBeVisible();
     await expect(page.locator('#status-filter-all')).toContainText('0');
+
+    await page.locator('#layer-menu-toggle-btn').click();
+    await page.getByRole('button', { name: 'プライバシーポリシー' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: /プライバシーポリシー/ })).toBeVisible();
+    await page.getByRole('button', { name: '地図アプリに戻る' }).click();
+    await expect(page.locator('#visit-map-container')).toBeVisible();
+
+    await page.locator('#layer-menu-toggle-btn').click();
+    await page.getByRole('button', { name: '利用規約・クレジット' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: /利用規約/ })).toBeVisible();
+    await page.getByRole('button', { name: '地図アプリに戻る' }).click();
+    await expect(page.locator('#visit-map-container')).toBeVisible();
 
     // 3. Global search for Paris ("Eiffel Tower") & register as planned with From-To + multiline memo
     await page.locator('#nav-toggle-btn').click();
