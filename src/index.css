@@ -50,18 +50,6 @@
   }
 }
 
-.safe-bottom-left-spinner {
-  bottom: calc(max(var(--safe-bottom), var(--safe-top)) + 134px);
-  left: calc(var(--safe-left) + 14px);
-}
-
-@media (min-width: 640px) {
-  .safe-bottom-left-spinner {
-    bottom: calc(max(var(--safe-bottom), var(--safe-top)) + 119px);
-    left: calc(var(--safe-left) + 12px);
-  }
-}
-
 @layer base {
   html,
   body {

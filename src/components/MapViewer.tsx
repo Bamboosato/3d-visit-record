@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Loader2 } from 'lucide-react';
 import type {
   BaseMapId,
   InspectedPoint,
@@ -37,6 +36,7 @@ interface MapViewerProps {
   baseMap: BaseMapId;
   inspectedPoint: InspectedPoint | null;
   onStatusChange: (status: WebGPUStatus) => void;
+  onTileLoadingChange?: (loading: boolean) => void;
   onInspectEmptyPoint: (point: InspectedPoint) => void;
   onSelectSpot: (spot: VisitSpot) => void;
   onCameraChange?: (view: {
@@ -63,6 +63,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   baseMap,
   inspectedPoint,
   onStatusChange,
+  onTileLoadingChange,
   onInspectEmptyPoint,
   onSelectSpot,
   onCameraChange,
@@ -86,6 +87,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const onSelectSpotRef = useRef(onSelectSpot);
   const onCameraChangeRef = useRef(onCameraChange);
   const onStatusChangeRef = useRef(onStatusChange);
+  const onTileLoadingChangeRef = useRef(onTileLoadingChange);
 
   latestSpotsRef.current = spots;
   latestFilterRef.current = statusFilter;
@@ -96,6 +98,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onSelectSpotRef.current = onSelectSpot;
   onCameraChangeRef.current = onCameraChange;
   onStatusChangeRef.current = onStatusChange;
+  onTileLoadingChangeRef.current = onTileLoadingChange;
+
+  useEffect(() => {
+    onTileLoadingChangeRef.current?.(isTilesLoading);
+  }, [isTilesLoading]);
 
   const filteredSpots = useMemo(
     () => spots.filter((s) => matchesStatusFilter(s, statusFilter)),
@@ -557,18 +564,6 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             {lbl.name}
           </div>
         ))}
-      </div>
-
-      <div
-        role="status"
-        aria-live="polite"
-        aria-label={isTilesLoading ? '3D地形読込中' : undefined}
-        aria-hidden={!isTilesLoading}
-        className={`safe-bottom-left-spinner pointer-events-none absolute z-10 flex items-center justify-center w-8 h-8 rounded-full bg-slate-900/85 backdrop-blur-md border border-slate-700/70 shadow-lg text-sky-400 transition-opacity duration-200 ${
-          isTilesLoading ? 'opacity-100' : 'opacity-0'
-        }`}
-      >
-        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
       </div>
     </div>
   );

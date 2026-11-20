@@ -146,6 +146,7 @@ export const App: React.FC = () => {
   const [isLayerOpen, setIsLayerOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
+  const [isMapLoading, setIsMapLoading] = useState(true);
   const [toastText, setToastText] = useState<string | null>(null);
 
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -778,6 +779,7 @@ export const App: React.FC = () => {
         baseMap={baseMap}
         inspectedPoint={inspectedPoint}
         onStatusChange={setGpuStatus}
+        onTileLoadingChange={setIsMapLoading}
         onInspectEmptyPoint={handleInspectEmptyPoint}
         onSelectSpot={(spot) => handleSelectSpot(spot, { preserveCamera: true })}
         onCameraChange={handleCameraChange}
@@ -797,7 +799,12 @@ export const App: React.FC = () => {
             aria-label={`3D Visit 表示絞り込み（現在: ${activeMobileFilter.label} ${activeMobileFilter.count}件）`}
             className="min-h-[38px] whitespace-nowrap inline-flex items-center gap-1.5 pl-2.5 pr-2.5 py-1 rounded-full bg-slate-900/90 hover:bg-slate-800/95 backdrop-blur-md border border-slate-700/80 shadow-lg text-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
-            <Compass className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
+            <Compass
+              className={`w-4 h-4 text-sky-400 shrink-0 ${
+                isMapLoading ? 'animate-spin [animation-duration:2s]' : ''
+              }`}
+              aria-hidden="true"
+            />
             <span className="font-bold text-xs tracking-tight text-white">3D Visit</span>
             <span className="inline-flex items-center gap-1 pl-1.5 border-l border-slate-700/80 text-[11px] font-semibold text-slate-200">
               {activeMobileFilter.icon}
@@ -855,7 +862,12 @@ export const App: React.FC = () => {
           title="3D Visit Record"
           className="pointer-events-auto hidden md:inline-flex shrink-0 min-h-[42px] whitespace-nowrap items-center gap-1.5 pl-3 pr-2.5 py-1 rounded-full rounded-r-none bg-slate-900/90 backdrop-blur-md border border-slate-700/80 border-r border-r-slate-700/80 shadow-lg"
         >
-          <Compass className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
+          <Compass
+            className={`w-4 h-4 text-sky-400 shrink-0 ${
+              isMapLoading ? 'animate-spin [animation-duration:2s]' : ''
+            }`}
+            aria-hidden="true"
+          />
           <span className="font-bold text-sm tracking-tight text-white">3D Visit</span>
         </div>
 
