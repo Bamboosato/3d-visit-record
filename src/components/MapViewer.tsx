@@ -167,17 +167,84 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
       let tileLoadingTimeout: ReturnType<typeof setTimeout> | null = null;
       let moveEndSettleTimer: ReturnType<typeof setTimeout> | null = null;
+      let showDelayTimer: ReturnType<typeof setTimeout> | null = null;
+      let minShowTimer: ReturnType<typeof setTimeout> | null = null;
+      let isSpinnerShown = true;
+      let spinnerShownAt = performance.now();
 
       clearTileLoadingTimeout = () => {
         if (tileLoadingTimeout !== null) {
           clearTimeout(tileLoadingTimeout);
           tileLoadingTimeout = null;
         }
+        if (showDelayTimer !== null) {
+          clearTimeout(showDelayTimer);
+          showDelayTimer = null;
+        }
+        if (minShowTimer !== null) {
+          clearTimeout(minShowTimer);
+          minShowTimer = null;
+        }
       };
       clearMoveEndSettleTimer = () => {
         if (moveEndSettleTimer !== null) {
           clearTimeout(moveEndSettleTimer);
           moveEndSettleTimer = null;
+        }
+      };
+
+      const finishTileLoading = () => {
+        if (disposed) return;
+        if (tileLoadingTimeout !== null) {
+          clearTimeout(tileLoadingTimeout);
+          tileLoadingTimeout = null;
+        }
+        clearMoveEndSettleTimer();
+        if (showDelayTimer !== null) {
+          clearTimeout(showDelayTimer);
+          showDelayTimer = null;
+        }
+        if (!isSpinnerShown) {
+          setIsTilesLoading(false);
+          return;
+        }
+        const elapsed = performance.now() - spinnerShownAt;
+        if (elapsed >= 300) {
+          isSpinnerShown = false;
+          setIsTilesLoading(false);
+        } else if (minShowTimer === null) {
+          minShowTimer = setTimeout(() => {
+            minShowTimer = null;
+            if (!disposed) {
+              isSpinnerShown = false;
+              setIsTilesLoading(false);
+            }
+          }, 300 - elapsed);
+        }
+      };
+
+      const startTileLoading = () => {
+        if (disposed) return;
+        if (minShowTimer !== null) {
+          clearTimeout(minShowTimer);
+          minShowTimer = null;
+        }
+        if (tileLoadingTimeout !== null) {
+          clearTimeout(tileLoadingTimeout);
+        }
+        tileLoadingTimeout = setTimeout(() => {
+          finishTileLoading();
+        }, 2500);
+
+        if (!isSpinnerShown && showDelayTimer === null) {
+          showDelayTimer = setTimeout(() => {
+            showDelayTimer = null;
+            if (!disposed) {
+              isSpinnerShown = true;
+              spinnerShownAt = performance.now();
+              setIsTilesLoading(true);
+            }
+          }, 250);
         }
       };
 
@@ -204,8 +271,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         const checkSettle = () => {
           if (disposed) return;
           if (map.areTilesLoaded() || retries <= 0) {
-            clearTileLoadingTimeout();
-            setIsTilesLoading(false);
+            finishTileLoading();
           } else {
             retries -= 1;
             moveEndSettleTimer = setTimeout(checkSettle, 200);
@@ -217,27 +283,19 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       map.on('dataloading', (e) => {
         if (disposed) return;
         if (e.dataType === 'source') {
-          setIsTilesLoading(true);
-          clearTileLoadingTimeout();
-          tileLoadingTimeout = setTimeout(() => {
-            if (!disposed) setIsTilesLoading(false);
-          }, 2500);
+          startTileLoading();
         }
       });
 
       map.on('idle', () => {
         if (disposed) return;
-        clearTileLoadingTimeout();
-        clearMoveEndSettleTimer();
-        setIsTilesLoading(false);
+        finishTileLoading();
       });
 
       map.on('error', () => {
         if (disposed) return;
         if (map.areTilesLoaded()) {
-          clearTileLoadingTimeout();
-          clearMoveEndSettleTimer();
-          setIsTilesLoading(false);
+          finishTileLoading();
         }
       });
 
@@ -501,15 +559,17 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         ))}
       </div>
 
-      {isTilesLoading && (
-        <div
-          aria-live="polite"
-          className="safe-top-loading-badge pointer-events-none fixed z-10 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/85 backdrop-blur-md border border-slate-700/70 text-[11px] text-slate-200 shadow-lg"
-        >
-          <Loader2 className="w-3 h-3 animate-spin text-sky-400" aria-hidden="true" />
-          <span>3D地形読込中</span>
-        </div>
-      )}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-label={isTilesLoading ? '3D地形読込中' : undefined}
+        aria-hidden={!isTilesLoading}
+        className={`safe-bottom-left-spinner pointer-events-none absolute z-10 flex items-center justify-center w-8 h-8 rounded-full bg-slate-900/85 backdrop-blur-md border border-slate-700/70 shadow-lg text-sky-400 transition-opacity duration-200 ${
+          isTilesLoading ? 'opacity-100' : 'opacity-0'
+        }`}
+      >
+        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+      </div>
     </div>
   );
 };
