@@ -44,8 +44,10 @@
   body {
     margin: 0;
     padding: 0;
-    min-height: 100vh;
-    min-height: 100dvh;
+    width: 100%;
+    min-height: calc(100% + var(--safe-top));
+    min-height: calc(100vh + var(--safe-top));
+    min-height: calc(100dvh + var(--safe-top));
     background-color: #020617;
     color: #f1f5f9;
     accent-color: var(--brand-color);
@@ -63,19 +65,15 @@
   }
 }
 
-/* 地図アプリビューは画面枠（iOS下部セーフエリア含む）に固定し、静的ページ(/privacy, /terms)の縦スクロールは妨げない */
+/* 地図アプリビューはドキュメントフロー内で画面枠（iOS black-translucent 上部シフト分含む）を満たし、静的ページ(/privacy, /terms)の縦スクロールは妨げない */
 .app-viewport {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: calc(-1 * var(--safe-bottom));
-  width: 100vw;
+  position: relative;
+  width: 100%;
   width: 100dvw;
-  height: calc(100vh + var(--safe-bottom));
-  height: calc(100dvh + var(--safe-bottom));
-  min-height: calc(100vh + var(--safe-bottom));
-  min-height: calc(100dvh + var(--safe-bottom));
+  height: calc(100vh + var(--safe-top));
+  height: calc(100dvh + var(--safe-top));
+  min-height: calc(100vh + var(--safe-top));
+  min-height: calc(100dvh + var(--safe-top));
   overflow: hidden;
   touch-action: manipulation;
   background-color: #020617;

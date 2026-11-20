@@ -1,5 +1,5 @@
-const SHELL_CACHE = 'visit3d-shell-v1';
-const PREVIOUS_SHELL_CACHE = 'visit3d-shell-v0';
+const SHELL_CACHE = 'visit3d-shell-v2';
+const PREVIOUS_SHELL_CACHE = 'visit3d-shell-v1';
 const MAX_SHELL_ENTRIES = 120;
 const MAX_SHELL_BYTES = 40 * 1024 * 1024;
 const PRECACHE_URLS = ['/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/icon.svg', /*BUILD_ASSETS*/];
