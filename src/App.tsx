@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as maplibregl from 'maplibre-gl';
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   ChevronDown,
   Clock,
@@ -14,11 +15,12 @@ import {
 } from 'lucide-react';
 import { MapViewer } from './components/MapViewer';
 import { StatusFilterBar } from './components/StatusFilterBar';
-import { SpotDetailSheet } from './components/SpotDetailSheet';
+import { SpotDetailSheet, type PendingPhotoDraft } from './components/SpotDetailSheet';
 import { SpotNavDrawer } from './components/SpotNavDrawer';
 import { CloudSyncDialog } from './components/CloudSyncDialog';
 import { LayerMenu } from './components/LayerMenu';
 import { StaticPolicyPage } from './components/StaticPolicyPage';
+import { PhotoProposalCard, type PhotoProposalState } from './components/PhotoProposalCard';
 import { DEFAULT_INITIAL_CAMERA } from './lib/maplibreHelper';
 import { fetchPointElevationFromAW3D } from './lib/jaxaClient';
 import {
@@ -42,13 +44,19 @@ import {
   collectReferencedPhotoIds,
   createUuid,
   deriveSpotStatus,
+  findPhotoLocationMatches,
   hasUnuploadedPhotos,
   isSameCoordinate,
   matchesStatusFilter,
 } from './lib/spotDomain';
 import { invalidatePhotoUrl } from './lib/photoUrlCache';
 import { HYAKUMEIZAN_PRESETS } from './lib/hyakumeizanData';
-import { calcDistanceMeters } from './lib/osmPlaceClient';
+import { calcDistanceMeters, fetchOsmPlaceContext } from './lib/osmPlaceClient';
+import {
+  buildSuggestedVisitDateFromPhotos,
+  extractExifMetadataFromFile,
+} from './lib/photoExif';
+import { processPhotoFilesSerial } from './lib/photoProcessor';
 import {
   buildPublicShareUrl,
   parseUrlViewState,
@@ -59,8 +67,10 @@ import { runViewTransition } from './lib/viewTransition';
 import { getVisitDateRange } from './lib/visitDate';
 import {
   MAX_ENTRIES_PER_SPOT,
+  MAX_PHOTOS_PER_ENTRY,
   MAX_SPOTS,
   type BaseMapId,
+  type DraftPhotoItem,
   type DriveSyncMeta,
   type InspectedPoint,
   type LocalAppState,
@@ -156,10 +166,16 @@ export const App: React.FC = () => {
   const [isMapLoading, setIsMapLoading] = useState(true);
   const [toastText, setToastText] = useState<string | null>(null);
   const [photoCacheVersion, setPhotoCacheVersion] = useState(0);
+  const [photoProposal, setPhotoProposal] = useState<PhotoProposalState | null>(null);
+  const [pendingPhotoDraft, setPendingPhotoDraft] = useState<PendingPhotoDraft | null>(null);
+  const [isReadingPhotoExif, setIsReadingPhotoExif] = useState(false);
 
   const mapRef = useRef<maplibregl.Map | null>(null);
   const cameraSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const photoProposalInputRef = useRef<HTMLInputElement | null>(null);
+  const photoProposalFilesRef = useRef<File[]>([]);
+  const photoProposalAbortRef = useRef<AbortController | null>(null);
 
   const initialCamera = useMemo<{ center: [number, number] } & SpotCamera>(() => {
     const url = initialUrlStateRef.current;
@@ -456,6 +472,291 @@ export const App: React.FC = () => {
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
     );
   }, [isLocating, appState.spots, flyTo, handleSelectSpot, showToast]);
+
+  const handleDismissPhotoProposal = useCallback(() => {
+    photoProposalAbortRef.current?.abort();
+    photoProposalAbortRef.current = null;
+    photoProposalFilesRef.current = [];
+    setPhotoProposal(null);
+  }, []);
+
+  const handlePhotoProposalFilesSelected = useCallback(
+    async (fileList: FileList | File[]) => {
+      const rawFiles = Array.from(fileList);
+      if (rawFiles.length === 0) return;
+
+      const accepted = rawFiles.slice(0, MAX_PHOTOS_PER_ENTRY);
+      if (rawFiles.length > MAX_PHOTOS_PER_ENTRY) {
+        showToast(
+          `1回の記録につき最大 ${MAX_PHOTOS_PER_ENTRY} 枚までのため、先頭 ${accepted.length} 枚を対象にしました。`
+        );
+      }
+
+      photoProposalAbortRef.current?.abort();
+      const abortController = new AbortController();
+      photoProposalAbortRef.current = abortController;
+      photoProposalFilesRef.current = accepted;
+      setIsReadingPhotoExif(true);
+
+      try {
+        let gpsCenter: [number, number] | null = null;
+        let gpsAltitude: number | undefined;
+        let hasSpreadLocations = false;
+        const localDates: Array<string | undefined> = [];
+
+        for (const file of accepted) {
+          const meta = await extractExifMetadataFromFile(file);
+          if (abortController.signal.aborted) return;
+          if (meta?.date?.localDate) {
+            localDates.push(meta.date.localDate);
+          }
+          if (meta?.gps) {
+            if (!gpsCenter) {
+              gpsCenter = meta.gps.center;
+              gpsAltitude = meta.gps.altitude;
+            } else {
+              const dist = calcDistanceMeters(
+                gpsCenter[1],
+                gpsCenter[0],
+                meta.gps.center[1],
+                meta.gps.center[0]
+              );
+              if (dist > 500) {
+                hasSpreadLocations = true;
+              }
+            }
+          }
+        }
+
+        const suggestedDate = buildSuggestedVisitDateFromPhotos(localDates);
+
+        if (!gpsCenter) {
+          setPhotoProposal({
+            fileCount: rawFiles.length,
+            acceptedCount: accepted.length,
+            gpsCenter: null,
+            hasSpreadLocations: false,
+            suggestedDate,
+            nearbySpots: [],
+            nearbyMountain: null,
+            osmContext: null,
+            isLoadingOsm: false,
+            isPreparingDraft: false,
+          });
+          return;
+        }
+
+        // GPSが見つかった場合は該当座標へ地図を移動し、既存の選択状態はクリアして提案UIを表示
+        runViewTransition(() => {
+          setSelectedSpotId(null);
+          setInspectedPoint(null);
+          setPendingPhotoDraft(null);
+        });
+        const currentZoom = mapRef.current?.getZoom() ?? 10.5;
+        flyTo(gpsCenter, { zoom: Math.max(currentZoom, 14), pitch: 55 });
+
+        const matches = findPhotoLocationMatches(
+          gpsCenter,
+          appState.spots,
+          HYAKUMEIZAN_PRESETS
+        );
+        const needsReverseGeocode =
+          matches.nearbySpots.length === 0 && matches.nearbyMountain === null;
+
+        setPhotoProposal({
+          fileCount: rawFiles.length,
+          acceptedCount: accepted.length,
+          gpsCenter,
+          gpsAltitude,
+          hasSpreadLocations,
+          suggestedDate,
+          nearbySpots: matches.nearbySpots,
+          nearbyMountain: matches.nearbyMountain,
+          osmContext: null,
+          isLoadingOsm: needsReverseGeocode,
+          isPreparingDraft: false,
+        });
+
+        if (needsReverseGeocode) {
+          void fetchOsmPlaceContext(gpsCenter[1], gpsCenter[0], {
+            signal: abortController.signal,
+            onPartialUpdate: (ctx) => {
+              if (!abortController.signal.aborted) {
+                setPhotoProposal((prev) =>
+                  prev ? { ...prev, osmContext: ctx } : prev
+                );
+              }
+            },
+          })
+            .then((ctx) => {
+              if (!abortController.signal.aborted) {
+                setPhotoProposal((prev) =>
+                  prev ? { ...prev, osmContext: ctx, isLoadingOsm: false } : prev
+                );
+              }
+            })
+            .catch(() => {
+              if (!abortController.signal.aborted) {
+                setPhotoProposal((prev) =>
+                  prev ? { ...prev, isLoadingOsm: false } : prev
+                );
+              }
+            });
+        }
+      } finally {
+        if (!abortController.signal.aborted) {
+          setIsReadingPhotoExif(false);
+        }
+      }
+    },
+    [appState.spots, flyTo, showToast]
+  );
+
+  const prepareDraftPhotosFromProposal = useCallback(async (): Promise<{
+    draftPhotos: DraftPhotoItem[];
+    errors: string[];
+  }> => {
+    const files = photoProposalFilesRef.current;
+    const results = await processPhotoFilesSerial(files);
+    const draftPhotos: DraftPhotoItem[] = [];
+    const errors: string[] = [];
+
+    for (const item of results) {
+      if (item.ok) {
+        const previewUrl =
+          typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+            ? URL.createObjectURL(item.result.thumbnailBlob)
+            : '';
+        draftPhotos.push({
+          attachment: item.result.attachment,
+          fullBlob: item.result.fullBlob,
+          thumbnailBlob: item.result.thumbnailBlob,
+          previewUrl,
+          isNew: true,
+          exifLocalDate: item.result.exifLocalDate,
+        });
+      } else {
+        errors.push(`${item.fileName}: ${item.error}`);
+      }
+    }
+
+    return { draftPhotos, errors };
+  }, []);
+
+  const handleAcceptAddEntryFromPhoto = useCallback(
+    async (spotId: string) => {
+      if (!photoProposal) return;
+      const targetSpot = appState.spots.find((s) => s.id === spotId);
+      if (!targetSpot) return;
+
+      setPhotoProposal((prev) =>
+        prev ? { ...prev, isPreparingDraft: true, errorMessage: null } : prev
+      );
+
+      const { draftPhotos, errors } = await prepareDraftPhotosFromProposal();
+      if (draftPhotos.length === 0) {
+        setPhotoProposal((prev) =>
+          prev
+            ? {
+                ...prev,
+                isPreparingDraft: false,
+                errorMessage: errors[0] || '画像を読み込めませんでした。',
+              }
+            : prev
+        );
+        return;
+      }
+      if (errors.length > 0) {
+        showToast(`一部の画像をスキップしました: ${errors[0]}`);
+      }
+
+      photoProposalAbortRef.current?.abort();
+      photoProposalFilesRef.current = [];
+      setPendingPhotoDraft({
+        key: createUuid(),
+        targetMode: 'add-entry',
+        draftPhotos,
+        suggestedDate: photoProposal.suggestedDate ?? undefined,
+      });
+      setPhotoProposal(null);
+      handleSelectSpot(targetSpot);
+    },
+    [appState.spots, handleSelectSpot, photoProposal, prepareDraftPhotosFromProposal, showToast]
+  );
+
+  const handleAcceptCreateSpotFromPhoto = useCallback(async () => {
+    if (!photoProposal || !photoProposal.gpsCenter) return;
+
+    setPhotoProposal((prev) =>
+      prev ? { ...prev, isPreparingDraft: true, errorMessage: null } : prev
+    );
+
+    const { draftPhotos, errors } = await prepareDraftPhotosFromProposal();
+    if (draftPhotos.length === 0) {
+      setPhotoProposal((prev) =>
+        prev
+          ? {
+              ...prev,
+              isPreparingDraft: false,
+              errorMessage: errors[0] || '画像を読み込めませんでした。',
+            }
+          : prev
+      );
+      return;
+    }
+    if (errors.length > 0) {
+      showToast(`一部の画像をスキップしました: ${errors[0]}`);
+    }
+
+    const [lng, lat] = photoProposal.gpsCenter;
+    const mountain = photoProposal.nearbyMountain?.mountain;
+    const osmTop = photoProposal.osmContext?.candidates[0];
+    const suggestedName =
+      mountain?.name ?? osmTop?.name ?? photoProposal.osmContext?.addressSummary ?? '';
+    const suggestedCategory: SpotCategory = mountain
+      ? 'nature'
+      : (osmTop?.suggestedSpotCategory ?? 'nature');
+
+    const point: InspectedPoint = {
+      lng,
+      lat,
+      elevation:
+        mountain?.elevation ??
+        (photoProposal.gpsAltitude !== undefined ? Math.round(photoProposal.gpsAltitude) : null),
+      label: suggestedName || undefined,
+      addressSummary: mountain?.region ?? photoProposal.osmContext?.addressSummary,
+      presetId: mountain?.id,
+      suggestedCategory,
+    };
+
+    photoProposalAbortRef.current?.abort();
+    photoProposalFilesRef.current = [];
+    setPendingPhotoDraft({
+      key: createUuid(),
+      targetMode: 'create-spot',
+      draftPhotos,
+      suggestedDate: photoProposal.suggestedDate ?? undefined,
+      suggestedName,
+      suggestedCategory,
+    });
+    setPhotoProposal(null);
+    runViewTransition(() => {
+      setSelectedSpotId(null);
+      setInspectedPoint(point);
+    });
+
+    if (point.elevation === null) {
+      void fetchPointElevationFromAW3D(lng, lat).then((elev) => {
+        if (elev !== null) {
+          setInspectedPoint((prev) =>
+            prev && isSameCoordinate(prev.lng, prev.lat, lng, lat, 0.0001)
+              ? { ...prev, elevation: elev }
+              : prev
+          );
+        }
+      });
+    }
+  }, [photoProposal, prepareDraftPhotosFromProposal, showToast]);
 
   const syncPhotoCacheAfterSpotsChange = useCallback(
     (prevSpots: VisitSpot[], nextSpots: VisitSpot[]) => {
@@ -1077,15 +1378,66 @@ export const App: React.FC = () => {
         onSelectMountain={handleSelectMountain}
       />
 
+      {/* Hidden file input for photo EXIF spot proposal */}
+      <input
+        ref={photoProposalInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="sr-only"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files && files.length > 0) {
+            void handlePhotoProposalFilesSelected(files);
+          }
+          e.target.value = '';
+        }}
+      />
+
+      {/* Bottom-right Floating Action Button: 写真から記録を作成（案B） */}
+      {!selectedSpot && !inspectedPoint && !photoProposal && !isNavOpen && !isSyncOpen && (
+        <button
+          type="button"
+          id="fab-create-from-photo"
+          disabled={isReadingPhotoExif}
+          onClick={() => photoProposalInputRef.current?.click()}
+          aria-label="写真から記録を作成"
+          title="写真の位置情報から記録を作成"
+          className="pointer-events-auto fixed bottom-[calc(max(var(--safe-bottom),var(--safe-top))+3.5rem)] right-3 sm:right-4 z-20 inline-flex items-center justify-center gap-2 min-w-[48px] min-h-[48px] px-3 sm:px-4 rounded-full bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-60 text-white text-xs sm:text-sm font-bold shadow-xl border border-sky-400/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        >
+          {isReadingPhotoExif ? (
+            <Loader2 className="w-5 h-5 animate-spin shrink-0" aria-hidden="true" />
+          ) : (
+            <Camera className="w-5 h-5 shrink-0" aria-hidden="true" />
+          )}
+          <span className="hidden sm:inline">写真から記録</span>
+        </button>
+      )}
+
+      {/* Photo EXIF Spot Proposal Card */}
+      {photoProposal && (
+        <PhotoProposalCard
+          proposal={photoProposal}
+          onAcceptAddEntry={handleAcceptAddEntryFromPhoto}
+          onAcceptCreateSpot={handleAcceptCreateSpotFromPhoto}
+          onDismiss={handleDismissPhotoProposal}
+        />
+      )}
+
       {/* Detail / Registration Sheet */}
       <SpotDetailSheet
         selectedSpot={selectedSpot}
         inspectedPoint={inspectedPoint}
         nearbyDuplicateSpot={nearbyDuplicateSpot}
+        pendingPhotoDraft={pendingPhotoDraft}
+        onClearPendingPhotoDraft={() => setPendingPhotoDraft(null)}
         photoCacheVersion={photoCacheVersion}
         onPhotoCached={handlePhotoCacheUpdated}
         onClose={() =>
           runViewTransition(() => {
+            setPendingPhotoDraft(null);
             setSelectedSpotId(null);
             setInspectedPoint(null);
           })

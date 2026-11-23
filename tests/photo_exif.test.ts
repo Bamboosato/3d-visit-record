@@ -3,6 +3,8 @@ import {
   buildSuggestedVisitDateFromPhotos,
   extractExifDateFromBuffer,
   extractExifDateFromFile,
+  extractExifMetadataFromBuffer,
+  extractExifMetadataFromFile,
   extractLocalDateFromTakenAt,
 } from '../src/lib/photoExif';
 
@@ -247,5 +249,189 @@ describe('photoExif', () => {
       start: '2025-10-10',
       end: '2025-10-12',
     });
+  });
+
+  it('extracts GPS coordinates and altitude from JPEG/WebP in little-endian and big-endian', async () => {
+    function buildTiffWithGps(opts: {
+      littleEndian: boolean;
+      dateTimeOriginal?: string;
+      latRef: string;
+      latDms: [Array<[number, number]>[number], Array<[number, number]>[number], Array<[number, number]>[number]];
+      lngRef: string;
+      lngDms: [Array<[number, number]>[number], Array<[number, number]>[number], Array<[number, number]>[number]];
+      altitude?: [number, number];
+      altRef?: number;
+    }): Uint8Array {
+      const le = opts.littleEndian;
+      const buf = new Uint8Array(1024);
+      const view = new DataView(buf.buffer);
+      if (le) {
+        buf[0] = 0x49;
+        buf[1] = 0x49;
+      } else {
+        buf[0] = 0x4d;
+        buf[1] = 0x4d;
+      }
+      view.setUint16(2, 0x002a, le);
+      view.setUint32(4, 8, le);
+
+      const hasExif = Boolean(opts.dateTimeOriginal);
+      const ifd0Count = 1 + (hasExif ? 1 : 0);
+      const ifd0Start = 8;
+      let cursor = ifd0Start + 2 + ifd0Count * 12 + 4;
+
+      let exifIfdStart = 0;
+      if (hasExif) {
+        exifIfdStart = cursor;
+        cursor += 2 + 12 + 4;
+      }
+      const gpsIfdStart = cursor;
+      const gpsCount = opts.altitude ? (opts.altRef !== undefined ? 6 : 5) : 4;
+      cursor += 2 + gpsCount * 12 + 4;
+
+      // IFD0
+      view.setUint16(ifd0Start, ifd0Count, le);
+      let idx0 = 0;
+      if (hasExif) {
+        const p = ifd0Start + 2 + idx0 * 12;
+        view.setUint16(p, 0x8769, le);
+        view.setUint16(p + 2, 4, le);
+        view.setUint32(p + 4, 1, le);
+        view.setUint32(p + 8, exifIfdStart, le);
+        idx0++;
+
+        view.setUint16(exifIfdStart, 1, le);
+        const ep = exifIfdStart + 2;
+        view.setUint16(ep, 0x9003, le);
+        view.setUint16(ep + 2, 2, le);
+        view.setUint32(ep + 4, opts.dateTimeOriginal!.length + 1, le);
+        view.setUint32(ep + 8, cursor, le);
+        writeAscii(buf, cursor, opts.dateTimeOriginal!);
+        cursor += opts.dateTimeOriginal!.length + 1;
+      }
+      {
+        const p = ifd0Start + 2 + idx0 * 12;
+        view.setUint16(p, 0x8825, le);
+        view.setUint16(p + 2, 4, le);
+        view.setUint32(p + 4, 1, le);
+        view.setUint32(p + 8, gpsIfdStart, le);
+      }
+
+      const writeRationals = (pairs: Array<[number, number]>): number => {
+        const start = cursor;
+        for (const [num, den] of pairs) {
+          view.setUint32(cursor, num, le);
+          view.setUint32(cursor + 4, den, le);
+          cursor += 8;
+        }
+        return start;
+      };
+
+      // GPS IFD
+      view.setUint16(gpsIfdStart, gpsCount, le);
+      let gIdx = 0;
+      const writeGpsEntry = (tag: number, type: number, count: number, valOrPtr: number, inlineStr?: string) => {
+        const gp = gpsIfdStart + 2 + gIdx * 12;
+        view.setUint16(gp, tag, le);
+        view.setUint16(gp + 2, type, le);
+        view.setUint32(gp + 4, count, le);
+        if (inlineStr !== undefined) {
+          writeAscii(buf, gp + 8, inlineStr);
+        } else {
+          view.setUint32(gp + 8, valOrPtr, le);
+        }
+        gIdx++;
+      };
+
+      writeGpsEntry(0x0001, 2, 2, 0, opts.latRef);
+      writeGpsEntry(0x0002, 5, 3, writeRationals(opts.latDms));
+      writeGpsEntry(0x0003, 2, 2, 0, opts.lngRef);
+      writeGpsEntry(0x0004, 5, 3, writeRationals(opts.lngDms));
+      if (opts.altRef !== undefined) {
+        const gp = gpsIfdStart + 2 + gIdx * 12;
+        view.setUint16(gp, 0x0005, le);
+        view.setUint16(gp + 2, 1, le);
+        view.setUint32(gp + 4, 1, le);
+        buf[gp + 8] = opts.altRef;
+        gIdx++;
+      }
+      if (opts.altitude) {
+        writeGpsEntry(0x0006, 5, 1, writeRationals([opts.altitude]));
+      }
+
+      return buf.slice(0, cursor + 8);
+    }
+
+    // 北緯・東経（富士山付近: 35°21'38.0"N, 138°43'39.0"E, 標高 3776m）、Little-Endian JPEG
+    const tiffMtFuji = buildTiffWithGps({
+      littleEndian: true,
+      dateTimeOriginal: '2025:08:10 06:30:00',
+      latRef: 'N',
+      latDms: [[35, 1], [21, 1], [3800, 100]],
+      lngRef: 'E',
+      lngDms: [[138, 1], [43, 1], [3900, 100]],
+      altRef: 0,
+      altitude: [37765, 10],
+    });
+    const metaFuji = await extractExifMetadataFromFile(
+      new Blob([wrapJpegApp1(tiffMtFuji) as unknown as BlobPart], { type: 'image/jpeg' })
+    );
+    expect(metaFuji?.date?.localDate).toBe('2025-08-10');
+    expect(metaFuji?.gps?.center[0]).toBeCloseTo(138.7275, 4);
+    expect(metaFuji?.gps?.center[1]).toBeCloseTo(35.360556, 4);
+    expect(metaFuji?.gps?.altitude).toBe(3776.5);
+
+    // 南緯・西経（Big-Endian WebP、海抜下）
+    const tiffSouthWest = buildTiffWithGps({
+      littleEndian: false,
+      latRef: 'S',
+      latDms: [[33, 1], [51, 1], [54, 1]],
+      lngRef: 'W',
+      lngDms: [[70, 1], [40, 1], [0, 1]],
+      altRef: 1,
+      altitude: [12, 1],
+    });
+    const metaSW = extractExifMetadataFromBuffer(wrapWebpExif(tiffSouthWest, true));
+    expect(metaSW?.gps?.center[0]).toBeCloseTo(-70.666667, 4);
+    expect(metaSW?.gps?.center[1]).toBeCloseTo(-33.865, 4);
+    expect(metaSW?.gps?.altitude).toBe(-12);
+
+    // Null Island [0, 0] は無効として null
+    const tiffNullIsland = buildTiffWithGps({
+      littleEndian: true,
+      latRef: 'N',
+      latDms: [[0, 1], [0, 1], [0, 1]],
+      lngRef: 'E',
+      lngDms: [[0, 1], [0, 1], [0, 1]],
+    });
+    expect(extractExifMetadataFromBuffer(wrapJpegApp1(tiffNullIsland))).toBeNull();
+
+    // 範囲外（緯度 95度）や分母 0 は無効として null
+    const tiffOutOfRange = buildTiffWithGps({
+      littleEndian: true,
+      latRef: 'N',
+      latDms: [[95, 1], [0, 1], [0, 1]],
+      lngRef: 'E',
+      lngDms: [[139, 1], [0, 1], [0, 1]],
+    });
+    expect(extractExifMetadataFromBuffer(wrapJpegApp1(tiffOutOfRange))).toBeNull();
+
+    const tiffZeroDen = buildTiffWithGps({
+      littleEndian: true,
+      latRef: 'N',
+      latDms: [[35, 0], [0, 1], [0, 1]],
+      lngRef: 'E',
+      lngDms: [[139, 1], [0, 1], [0, 1]],
+    });
+    expect(extractExifMetadataFromBuffer(wrapJpegApp1(tiffZeroDen))).toBeNull();
+
+    // GPS タグ欠損時は date のみ返り gps は null
+    const dateOnlyTiff = buildTiffExifBytes({
+      littleEndian: true,
+      dateTimeOriginal: '2025:11:01 10:00:00',
+    });
+    const dateOnlyMeta = extractExifMetadataFromBuffer(wrapJpegApp1(dateOnlyTiff));
+    expect(dateOnlyMeta?.date?.localDate).toBe('2025-11-01');
+    expect(dateOnlyMeta?.gps).toBeNull();
   });
 });

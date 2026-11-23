@@ -19,11 +19,13 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  DraftPhotoItem,
   InspectedPoint,
   PhotoAttachment,
   SpotCategory,
   SpotStatus,
   StoredPhotoRecord,
+  VisitDate,
   VisitEntry,
   VisitSpot,
 } from '../types/visit';
@@ -39,10 +41,21 @@ import { SpotForm, type SpotFormMode, type SpotFormSubmitPayload } from './SpotF
 import { PhotoLightbox } from './PhotoLightbox';
 import { useUpdateBlocker } from '../lib/updateGuard';
 
+export interface PendingPhotoDraft {
+  key: string;
+  targetMode: 'create-spot' | 'add-entry';
+  draftPhotos: DraftPhotoItem[];
+  suggestedDate?: VisitDate;
+  suggestedName?: string;
+  suggestedCategory?: SpotCategory;
+}
+
 interface SpotDetailSheetProps {
   selectedSpot: VisitSpot | null;
   inspectedPoint: InspectedPoint | null;
   nearbyDuplicateSpot?: VisitSpot | null;
+  pendingPhotoDraft?: PendingPhotoDraft | null;
+  onClearPendingPhotoDraft?: () => void;
   photoCacheVersion?: number;
   onPhotoCached?: () => void;
   onClose: () => void;
@@ -198,6 +211,8 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
   selectedSpot,
   inspectedPoint,
   nearbyDuplicateSpot,
+  pendingPhotoDraft = null,
+  onClearPendingPhotoDraft,
   photoCacheVersion = 0,
   onPhotoCached,
   onClose,
@@ -230,7 +245,19 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
   useUpdateBlocker(formState !== null || submitting || isPhotoProcessing);
 
   useEffect(() => {
-    setFormState(null);
+    const shouldAutoOpenCreate =
+      pendingPhotoDraft?.targetMode === 'create-spot' && Boolean(inspectedPoint) && !selectedSpot;
+    const shouldAutoOpenAddEntry =
+      pendingPhotoDraft?.targetMode === 'add-entry' && Boolean(selectedSpot);
+
+    if (shouldAutoOpenCreate) {
+      setFormState({ mode: 'create-spot', defaultKind: 'visited' });
+    } else if (shouldAutoOpenAddEntry) {
+      setFormState({ mode: 'add-entry', defaultKind: 'visited' });
+    } else {
+      setFormState(null);
+    }
+
     setIsPhotoProcessing(false);
     setLightboxState(null);
     setRemoteStatusById({});
@@ -239,7 +266,7 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
     setCameraSavedFeedback(false);
     setOsmCandidates([]);
     setAddressSummary(inspectedPoint?.addressSummary);
-  }, [selectedSpot?.id, inspectedPoint?.lng, inspectedPoint?.lat]);
+  }, [selectedSpot?.id, inspectedPoint?.lng, inspectedPoint?.lat, pendingPhotoDraft?.key]);
 
   const spotPhotoSignature =
     selectedSpot?.entries
@@ -420,6 +447,7 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           photos: payload.photos,
           newPhotoRecords: payload.newPhotoRecords,
         });
+        onClearPendingPhotoDraft?.();
         setFormState(null);
       } else if (formState?.mode === 'edit-spot' && selectedSpot) {
         await onUpdateSpotMeta(selectedSpot.id, {
@@ -436,6 +464,7 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
           photos: payload.photos,
           newPhotoRecords: payload.newPhotoRecords,
         });
+        onClearPendingPhotoDraft?.();
         setFormState(null);
       } else if (
         (formState?.mode === 'edit-entry' || formState?.mode === 'convert-to-visited') &&
@@ -515,15 +544,36 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
         {formState?.mode === 'create-spot' ? (
           <SpotForm
             mode="create-spot"
-            initialName={inspectedPoint.label ?? ''}
-            initialCategory={inspectedPoint.suggestedCategory ?? 'nature'}
+            initialName={
+              pendingPhotoDraft?.targetMode === 'create-spot'
+                ? pendingPhotoDraft.suggestedName || inspectedPoint.label || ''
+                : (inspectedPoint.label ?? '')
+            }
+            initialCategory={
+              pendingPhotoDraft?.targetMode === 'create-spot'
+                ? (pendingPhotoDraft.suggestedCategory ?? inspectedPoint.suggestedCategory ?? 'nature')
+                : (inspectedPoint.suggestedCategory ?? 'nature')
+            }
             initialKind={formState.defaultKind}
+            initialDate={
+              pendingPhotoDraft?.targetMode === 'create-spot'
+                ? pendingPhotoDraft.suggestedDate
+                : undefined
+            }
+            initialDraftPhotos={
+              pendingPhotoDraft?.targetMode === 'create-spot'
+                ? pendingPhotoDraft.draftPhotos
+                : undefined
+            }
             osmCandidates={osmCandidates}
             isLoadingOsm={isLoadingOsm}
             submitting={submitting}
             onPhotoProcessingChange={setIsPhotoProcessing}
             onSubmit={handleFormSubmit}
-            onCancel={() => setFormState(null)}
+            onCancel={() => {
+              onClearPendingPhotoDraft?.();
+              setFormState(null);
+            }}
           />
         ) : (
           <div className="space-y-2">
@@ -732,7 +782,9 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
                 ? formState.entry.date
                 : formState.mode === 'convert-to-visited'
                   ? { precision: 'day', start: getTodayDateString() }
-                  : undefined
+                  : formState.mode === 'add-entry' && pendingPhotoDraft?.targetMode === 'add-entry'
+                    ? pendingPhotoDraft.suggestedDate
+                    : undefined
             }
             initialMemo={
               formState.mode === 'edit-entry' || formState.mode === 'convert-to-visited'
@@ -744,10 +796,18 @@ export const SpotDetailSheet: React.FC<SpotDetailSheetProps> = ({
                 ? formState.entry.photos
                 : undefined
             }
+            initialDraftPhotos={
+              formState.mode === 'add-entry' && pendingPhotoDraft?.targetMode === 'add-entry'
+                ? pendingPhotoDraft.draftPhotos
+                : undefined
+            }
             submitting={submitting}
             onPhotoProcessingChange={setIsPhotoProcessing}
             onSubmit={handleFormSubmit}
-            onCancel={() => setFormState(null)}
+            onCancel={() => {
+              onClearPendingPhotoDraft?.();
+              setFormState(null);
+            }}
           />
         </div>
       )}

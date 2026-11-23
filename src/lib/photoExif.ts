@@ -13,15 +13,38 @@ export interface ExtractedExifDate {
   sourceTag: ExifDateSourceTag;
 }
 
+export interface ExtractedExifGps {
+  /** [lng, lat] (VisitSpot.center と同じ形式) */
+  center: [number, number];
+  /** 標高 (m)。GPSAltitude タグがある場合のみ */
+  altitude?: number;
+}
+
+export interface ExtractedExifMetadata {
+  date: ExtractedExifDate | null;
+  gps: ExtractedExifGps | null;
+}
+
 const TAG_DATE_TIME = 0x0132;
 const TAG_EXIF_IFD_POINTER = 0x8769;
+const TAG_GPS_IFD_POINTER = 0x8825;
 const TAG_DATE_TIME_ORIGINAL = 0x9003;
 const TAG_DATE_TIME_DIGITIZED = 0x9004;
 const TAG_OFFSET_TIME = 0x9010;
 const TAG_OFFSET_TIME_ORIGINAL = 0x9011;
 const TAG_OFFSET_TIME_DIGITIZED = 0x9012;
+
+const TAG_GPS_LATITUDE_REF = 0x0001;
+const TAG_GPS_LATITUDE = 0x0002;
+const TAG_GPS_LONGITUDE_REF = 0x0003;
+const TAG_GPS_LONGITUDE = 0x0004;
+const TAG_GPS_ALTITUDE_REF = 0x0005;
+const TAG_GPS_ALTITUDE = 0x0006;
+
+const TYPE_BYTE = 1;
 const TYPE_ASCII = 2;
 const TYPE_LONG = 4;
+const TYPE_RATIONAL = 5;
 
 interface RawExifDates {
   dateTimeOriginal?: string;
@@ -30,6 +53,15 @@ interface RawExifDates {
   offsetOriginal?: string;
   offsetDigitized?: string;
   offsetTime?: string;
+}
+
+interface RawExifGps {
+  latRef?: string;
+  latDms?: [number, number, number];
+  lngRef?: string;
+  lngDms?: [number, number, number];
+  altRef?: number;
+  altitude?: number;
 }
 
 function createReader(bytes: Uint8Array, littleEndian: boolean) {
@@ -71,6 +103,79 @@ function readIfdAsciiValue(
   const absStart = tiffStart + relOffset;
   if (absStart < tiffStart || absStart + count > tiffEnd) return undefined;
   return readAsciiString(bytes, absStart, count);
+}
+
+function readIfdRationals(
+  entryOffset: number,
+  tiffStart: number,
+  tiffEnd: number,
+  count: number,
+  u32: (offset: number) => number
+): number[] | undefined {
+  if (count === 0 || count > 16) return undefined;
+  const relOffset = u32(entryOffset + 8);
+  const absStart = tiffStart + relOffset;
+  if (absStart < tiffStart || absStart + count * 8 > tiffEnd) return undefined;
+  const values: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const num = u32(absStart + i * 8);
+    const den = u32(absStart + i * 8 + 4);
+    if (den === 0) return undefined;
+    const val = num / den;
+    if (!Number.isFinite(val)) return undefined;
+    values.push(val);
+  }
+  return values;
+}
+
+function dmsToDecimal(dms: [number, number, number], ref: string, isLat: boolean): number | null {
+  const [deg, min, sec] = dms;
+  if (
+    !Number.isFinite(deg) ||
+    !Number.isFinite(min) ||
+    !Number.isFinite(sec) ||
+    deg < 0 ||
+    min < 0 ||
+    min >= 60 ||
+    sec < 0 ||
+    sec >= 60
+  ) {
+    return null;
+  }
+  const decimal = deg + min / 60 + sec / 3600;
+  const upperRef = ref.trim().toUpperCase();
+  let signed: number;
+  if (isLat) {
+    if (upperRef === 'N') signed = decimal;
+    else if (upperRef === 'S') signed = -decimal;
+    else return null;
+    if (signed < -90 || signed > 90) return null;
+  } else {
+    if (upperRef === 'E') signed = decimal;
+    else if (upperRef === 'W') signed = -decimal;
+    else return null;
+    if (signed < -180 || signed > 180) return null;
+  }
+  return signed;
+}
+
+function resolveGps(raw: RawExifGps): ExtractedExifGps | null {
+  if (!raw.latRef || !raw.latDms || !raw.lngRef || !raw.lngDms) return null;
+  const lat = dmsToDecimal(raw.latDms, raw.latRef, true);
+  const lng = dmsToDecimal(raw.lngDms, raw.lngRef, false);
+  if (lat === null || lng === null) return null;
+
+  // [0, 0] (Null Island) は無効値として除外
+  if (Math.abs(lat) < 1e-7 && Math.abs(lng) < 1e-7) return null;
+
+  const result: ExtractedExifGps = {
+    center: [lng, lat],
+  };
+  if (raw.altitude !== undefined && Number.isFinite(raw.altitude)) {
+    const signedAlt = raw.altRef === 1 ? -raw.altitude : raw.altitude;
+    result.altitude = Math.round(signedAlt * 10) / 10;
+  }
+  return result;
 }
 
 function parseExifTimestamp(
@@ -124,11 +229,12 @@ function parseIfdEntries(
   }
 }
 
-function parseTiffExifDates(
+function parseTiffExifMetadata(
   bytes: Uint8Array,
   tiffStart: number,
-  tiffEnd: number
-): ExtractedExifDate | null {
+  tiffEnd: number,
+  includeGps: boolean
+): ExtractedExifMetadata | null {
   if (tiffStart < 0 || tiffEnd > bytes.length || tiffStart + 8 > tiffEnd) return null;
 
   let littleEndian: boolean;
@@ -145,14 +251,17 @@ function parseTiffExifDates(
 
   const ifd0Offset = u32(tiffStart + 4);
   const collected: RawExifDates = {};
+  const rawGps: RawExifGps = {};
   let exifIfdOffset: number | null = null;
+  let gpsIfdOffset: number | null = null;
 
-  // IFD0: 撮影日時（DateTime）と Exif IFD ポインタのみ走査（GPS IFD は意図的に読まない）
   parseIfdEntries(bytes, tiffStart, tiffEnd, ifd0Offset, littleEndian, (tag, type, count, entryOffset) => {
     if (tag === TAG_DATE_TIME && type === TYPE_ASCII) {
       collected.dateTime = readIfdAsciiValue(bytes, entryOffset, tiffStart, tiffEnd, count, u32);
     } else if (tag === TAG_EXIF_IFD_POINTER && (type === TYPE_LONG || count === 1)) {
       exifIfdOffset = u32(entryOffset + 8);
+    } else if (includeGps && tag === TAG_GPS_IFD_POINTER && (type === TYPE_LONG || count === 1)) {
+      gpsIfdOffset = u32(entryOffset + 8);
     }
   });
 
@@ -165,6 +274,27 @@ function parseTiffExifDates(
       else if (tag === TAG_OFFSET_TIME_ORIGINAL) collected.offsetOriginal = val;
       else if (tag === TAG_OFFSET_TIME_DIGITIZED) collected.offsetDigitized = val;
       else if (tag === TAG_OFFSET_TIME) collected.offsetTime = val;
+    });
+  }
+
+  if (includeGps && gpsIfdOffset !== null) {
+    parseIfdEntries(bytes, tiffStart, tiffEnd, gpsIfdOffset, littleEndian, (tag, type, count, entryOffset) => {
+      if (tag === TAG_GPS_LATITUDE_REF && type === TYPE_ASCII) {
+        rawGps.latRef = readIfdAsciiValue(bytes, entryOffset, tiffStart, tiffEnd, count, u32);
+      } else if (tag === TAG_GPS_LONGITUDE_REF && type === TYPE_ASCII) {
+        rawGps.lngRef = readIfdAsciiValue(bytes, entryOffset, tiffStart, tiffEnd, count, u32);
+      } else if (tag === TAG_GPS_LATITUDE && type === TYPE_RATIONAL && count === 3) {
+        const vals = readIfdRationals(entryOffset, tiffStart, tiffEnd, 3, u32);
+        if (vals && vals.length === 3) rawGps.latDms = [vals[0], vals[1], vals[2]];
+      } else if (tag === TAG_GPS_LONGITUDE && type === TYPE_RATIONAL && count === 3) {
+        const vals = readIfdRationals(entryOffset, tiffStart, tiffEnd, 3, u32);
+        if (vals && vals.length === 3) rawGps.lngDms = [vals[0], vals[1], vals[2]];
+      } else if (tag === TAG_GPS_ALTITUDE_REF && type === TYPE_BYTE && count >= 1) {
+        rawGps.altRef = bytes[entryOffset + 8];
+      } else if (tag === TAG_GPS_ALTITUDE && type === TYPE_RATIONAL && count >= 1) {
+        const vals = readIfdRationals(entryOffset, tiffStart, tiffEnd, 1, u32);
+        if (vals && vals.length >= 1) rawGps.altitude = vals[0];
+      }
     });
   }
 
@@ -190,17 +320,22 @@ function parseTiffExifDates(
     },
   ];
 
+  let date: ExtractedExifDate | null = null;
   for (const c of candidates) {
     const parsed = parseExifTimestamp(c.rawDate, c.rawOffset);
     if (parsed) {
-      return {
+      date = {
         localDate: parsed.localDate,
         takenAt: parsed.takenAt,
         sourceTag: c.tag,
       };
+      break;
     }
   }
-  return null;
+
+  const gps = includeGps ? resolveGps(rawGps) : null;
+  if (!date && !gps) return null;
+  return { date, gps };
 }
 
 function hasExifHeaderAt(bytes: Uint8Array, offset: number): boolean {
@@ -215,7 +350,7 @@ function hasExifHeaderAt(bytes: Uint8Array, offset: number): boolean {
   );
 }
 
-function parseJpegExifDates(bytes: Uint8Array): ExtractedExifDate | null {
+function parseJpegExifMetadata(bytes: Uint8Array, includeGps: boolean): ExtractedExifMetadata | null {
   let offset = 2;
   while (offset + 1 < bytes.length) {
     if (bytes[offset] !== 0xff) break;
@@ -234,7 +369,7 @@ function parseJpegExifDates(bytes: Uint8Array): ExtractedExifDate | null {
 
     if (marker === 0xe1 && hasExifHeaderAt(bytes, payloadStart)) {
       const tiffEnd = Math.min(bytes.length, nextOffset);
-      const result = parseTiffExifDates(bytes, payloadStart + 6, tiffEnd);
+      const result = parseTiffExifMetadata(bytes, payloadStart + 6, tiffEnd, includeGps);
       if (result) return result;
     }
 
@@ -244,7 +379,7 @@ function parseJpegExifDates(bytes: Uint8Array): ExtractedExifDate | null {
   return null;
 }
 
-function parseWebpExifDates(bytes: Uint8Array): ExtractedExifDate | null {
+function parseWebpExifMetadata(bytes: Uint8Array, includeGps: boolean): ExtractedExifMetadata | null {
   let offset = 12;
   while (offset + 8 <= bytes.length) {
     const fourCc = String.fromCharCode(
@@ -260,7 +395,7 @@ function parseWebpExifDates(bytes: Uint8Array): ExtractedExifDate | null {
 
     if (fourCc === 'EXIF') {
       const tiffStart = hasExifHeaderAt(bytes, payloadStart) ? payloadStart + 6 : payloadStart;
-      const result = parseTiffExifDates(bytes, tiffStart, payloadEnd);
+      const result = parseTiffExifMetadata(bytes, tiffStart, payloadEnd, includeGps);
       if (result) return result;
     }
 
@@ -272,14 +407,17 @@ function parseWebpExifDates(bytes: Uint8Array): ExtractedExifDate | null {
   return null;
 }
 
-export function extractExifDateFromBuffer(input: ArrayBuffer | Uint8Array): ExtractedExifDate | null {
+function parseExifMetadataInternal(
+  input: ArrayBuffer | Uint8Array,
+  includeGps: boolean
+): ExtractedExifMetadata | null {
   try {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     if (bytes.length < 12) return null;
 
     // JPEG: FF D8
     if (bytes[0] === 0xff && bytes[1] === 0xd8) {
-      return parseJpegExifDates(bytes);
+      return parseJpegExifMetadata(bytes, includeGps);
     }
 
     // WebP: RIFF....WEBP
@@ -293,13 +431,35 @@ export function extractExifDateFromBuffer(input: ArrayBuffer | Uint8Array): Extr
       bytes[10] === 0x42 &&
       bytes[11] === 0x50
     ) {
-      return parseWebpExifDates(bytes);
+      return parseWebpExifMetadata(bytes, includeGps);
     }
 
     return null;
   } catch {
     return null;
   }
+}
+
+export function extractExifMetadataFromBuffer(
+  input: ArrayBuffer | Uint8Array
+): ExtractedExifMetadata | null {
+  return parseExifMetadataInternal(input, true);
+}
+
+export async function extractExifMetadataFromFile(
+  file: Blob
+): Promise<ExtractedExifMetadata | null> {
+  try {
+    const slice = file.slice(0, MAX_EXIF_SCAN_BYTES);
+    const buf = await slice.arrayBuffer();
+    return extractExifMetadataFromBuffer(buf);
+  } catch {
+    return null;
+  }
+}
+
+export function extractExifDateFromBuffer(input: ArrayBuffer | Uint8Array): ExtractedExifDate | null {
+  return parseExifMetadataInternal(input, false)?.date ?? null;
 }
 
 export async function extractExifDateFromFile(file: Blob): Promise<ExtractedExifDate | null> {

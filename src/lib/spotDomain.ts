@@ -292,3 +292,61 @@ export function cloneSpots(spots: VisitSpot[]): VisitSpot[] {
     })),
   }));
 }
+
+export const PHOTO_MATCH_SPOT_RADIUS_METERS = 300;
+export const PHOTO_MATCH_MOUNTAIN_RADIUS_METERS = 1000;
+
+export interface MatchedRegisteredSpot {
+  spot: VisitSpot;
+  distanceMeters: number;
+}
+
+export interface MatchedPresetMountain {
+  mountain: PresetMountain;
+  distanceMeters: number;
+}
+
+export interface PhotoLocationMatchResult {
+  nearbySpots: MatchedRegisteredSpot[];
+  nearbyMountain: MatchedPresetMountain | null;
+}
+
+/**
+ * 写真EXIFの [lng, lat] 座標から、優先度順にスポット候補をマッチングします。
+ * 1. 登録済みスポット（半径 300m 以内、近い順）
+ * 2. 未登録の日本百名山プリセット（半径 1,000m 以内、最も近い1件）
+ */
+export function findPhotoLocationMatches(
+  center: [number, number],
+  spots: VisitSpot[],
+  mountains: PresetMountain[]
+): PhotoLocationMatchResult {
+  const [lng, lat] = center;
+
+  const nearbySpots: MatchedRegisteredSpot[] = [];
+  for (const spot of spots) {
+    const distanceMeters = calcDistanceMeters(lat, lng, spot.center[1], spot.center[0]);
+    if (distanceMeters <= PHOTO_MATCH_SPOT_RADIUS_METERS) {
+      nearbySpots.push({ spot, distanceMeters });
+    }
+  }
+  nearbySpots.sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  if (nearbySpots.length > 0) {
+    return { nearbySpots, nearbyMountain: null };
+  }
+
+  let nearbyMountain: MatchedPresetMountain | null = null;
+  for (const mountain of mountains) {
+    if (matchHyakumeizanSpot(mountain, spots) !== null) continue;
+    const distanceMeters = calcDistanceMeters(lat, lng, mountain.center[1], mountain.center[0]);
+    if (
+      distanceMeters <= PHOTO_MATCH_MOUNTAIN_RADIUS_METERS &&
+      (!nearbyMountain || distanceMeters < nearbyMountain.distanceMeters)
+    ) {
+      nearbyMountain = { mountain, distanceMeters };
+    }
+  }
+
+  return { nearbySpots: [], nearbyMountain };
+}

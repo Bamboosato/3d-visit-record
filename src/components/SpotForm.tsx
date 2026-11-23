@@ -55,6 +55,7 @@ interface SpotFormProps {
   initialDate?: VisitDate;
   initialMemo?: string;
   initialPhotos?: PhotoAttachment[];
+  initialDraftPhotos?: DraftPhotoItem[];
   osmCandidates?: OsmPlaceCandidate[];
   isLoadingOsm?: boolean;
   submitting?: boolean;
@@ -79,6 +80,7 @@ export const SpotForm: React.FC<SpotFormProps> = ({
   initialDate,
   initialMemo = '',
   initialPhotos = [],
+  initialDraftPhotos,
   osmCandidates = [],
   isLoadingOsm = false,
   submitting = false,
@@ -110,13 +112,19 @@ export const SpotForm: React.FC<SpotFormProps> = ({
   const [endVal, setEndVal] = useState(defaultDate.end ?? '');
   const [useRange, setUseRange] = useState(Boolean(defaultDate.end));
   const [memo, setMemo] = useState(initialMemo);
-  const [draftPhotos, setDraftPhotos] = useState<DraftPhotoItem[]>(() =>
-    initialPhotos.map((attachment) => ({
+  const [draftPhotos, setDraftPhotos] = useState<DraftPhotoItem[]>(() => {
+    if (initialDraftPhotos && initialDraftPhotos.length > 0) {
+      return initialDraftPhotos.map((d) => ({
+        ...d,
+        attachment: { ...d.attachment },
+      }));
+    }
+    return initialPhotos.map((attachment) => ({
       attachment: { ...attachment },
       previewUrl: '',
       isNew: false,
-    }))
-  );
+    }));
+  });
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false);
   const draftPhotosRef = useRef<DraftPhotoItem[]>(draftPhotos);
   draftPhotosRef.current = draftPhotos;
@@ -145,7 +153,9 @@ export const SpotForm: React.FC<SpotFormProps> = ({
 
   // 既存写真のサムネイルキャッシュURLを取得し、アンマウント時に参照を解放する
   useEffect(() => {
-    if (initialPhotos.length === 0) return;
+    if ((initialDraftPhotos && initialDraftPhotos.length > 0) || initialPhotos.length === 0) {
+      return;
+    }
     let cancelled = false;
     const acquired: Array<{ id: string; url: string }> = [];
 
