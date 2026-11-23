@@ -1405,7 +1405,7 @@ export const App: React.FC = () => {
           onClick={() => photoProposalInputRef.current?.click()}
           aria-label="写真から記録を作成"
           title="写真の位置情報から記録を作成"
-          className="pointer-events-auto fixed bottom-[calc(max(var(--safe-bottom),var(--safe-top))+3rem)] sm:bottom-[calc(max(var(--safe-bottom),var(--safe-top))+2.5rem)] right-3 sm:right-4 z-20 inline-flex items-center justify-center gap-2 min-w-[48px] min-h-[48px] px-3 sm:px-4 rounded-full bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-60 text-white text-xs sm:text-sm font-bold shadow-xl border border-sky-400/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+          className="pointer-events-auto absolute bottom-[calc(max(var(--safe-bottom),var(--safe-top))+3rem)] sm:bottom-[calc(max(var(--safe-bottom),var(--safe-top))+2.5rem)] right-3 sm:right-4 z-20 inline-flex items-center justify-center gap-2 min-w-[48px] min-h-[48px] px-3 sm:px-4 rounded-full bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-60 text-white text-xs sm:text-sm font-bold shadow-xl border border-sky-400/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
         >
           {isReadingPhotoExif ? (
             <Loader2 className="w-5 h-5 animate-spin shrink-0" aria-hidden="true" />
