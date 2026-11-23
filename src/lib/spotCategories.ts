@@ -206,3 +206,116 @@ export function registerSpotSprites(map: maplibregl.Map): void {
     }
   }
 }
+
+export type ClusterVisualKind = 'visited' | 'planned' | 'mixed';
+
+function drawClusterSprite(
+  label: string,
+  kind: ClusterVisualKind
+): { width: number; height: number; data: Uint8ClampedArray } {
+  const size = 76; // rendered at pixelRatio: 2 -> 38x38 CSS px
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { width: size, height: size, data: new Uint8ClampedArray(size * size * 4) };
+  }
+
+  const cx = size / 2;
+  const cy = size / 2;
+  const haloR = 33;
+  const bodyR = 25;
+
+  const palette =
+    kind === 'visited'
+      ? {
+          halo: 'rgba(52, 211, 153, 0.3)',
+          fill: '#059669',
+          stroke: '#f8fafc',
+          text: '#ffffff',
+          dashed: false,
+        }
+      : kind === 'planned'
+        ? {
+            halo: 'rgba(251, 191, 36, 0.28)',
+            fill: 'rgba(15, 23, 42, 0.94)',
+            stroke: '#fbbf24',
+            text: '#fef3c7',
+            dashed: true,
+          }
+        : {
+            halo: 'rgba(56, 189, 248, 0.32)',
+            fill: '#0284c7',
+            stroke: '#f8fafc',
+            text: '#ffffff',
+            dashed: false,
+          };
+
+  // Outer translucent halo ring to signal aggregation
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, haloR, 0, Math.PI * 2);
+  ctx.fillStyle = palette.halo;
+  ctx.fill();
+  ctx.restore();
+
+  // Inner circle with shadow
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetY = 3;
+  ctx.beginPath();
+  ctx.arc(cx, cy, bodyR, 0, Math.PI * 2);
+  ctx.fillStyle = palette.fill;
+  ctx.fill();
+  ctx.restore();
+
+  // Ring border
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, bodyR, 0, Math.PI * 2);
+  if (palette.dashed) {
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 3.5;
+  } else {
+    ctx.lineWidth = 3;
+  }
+  ctx.strokeStyle = palette.stroke;
+  ctx.stroke();
+  ctx.restore();
+
+  // Cluster count text
+  ctx.save();
+  const fontSize = label.length >= 3 ? 21 : label.length === 2 ? 24 : 26;
+  ctx.font = `700 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = palette.text;
+  ctx.fillText(label, cx, cy + 1);
+  ctx.restore();
+
+  const imageData = ctx.getImageData(0, 0, size, size);
+  return { width: size, height: size, data: imageData.data };
+}
+
+const CLUSTER_SPRITE_ID_RE = /^cluster-(visited|planned|mixed)-(\d+|99\+)$/;
+
+export function ensureClusterSprite(map: maplibregl.Map, spriteId: string): boolean {
+  const match = CLUSTER_SPRITE_ID_RE.exec(spriteId);
+  if (!match) return false;
+  if (map.hasImage(spriteId)) return true;
+  const kind = match[1] as ClusterVisualKind;
+  const label = match[2];
+  const sprite = drawClusterSprite(label, kind);
+  map.addImage(
+    spriteId,
+    {
+      width: sprite.width,
+      height: sprite.height,
+      data: sprite.data,
+    },
+    { pixelRatio: 2 }
+  );
+  return true;
+}

@@ -15,7 +15,7 @@ import {
   initGraphicsBackend,
   registerVisitMapProtocols,
 } from '../lib/maplibreHelper';
-import { getSpotSpriteId, registerSpotSprites } from '../lib/spotCategories';
+import { ensureClusterSprite, getSpotSpriteId, registerSpotSprites } from '../lib/spotCategories';
 import { isHybridSpot, matchesStatusFilter } from '../lib/spotDomain';
 
 interface ViewportLabel {
@@ -51,6 +51,7 @@ interface MapViewerProps {
 
 const SPOTS_SOURCE_ID = 'visit-spots-source';
 const SPOTS_LAYER_ID = 'visit-spots-pins';
+const CLUSTERS_LAYER_ID = 'visit-spots-clusters';
 const MAX_VIEWPORT_LABELS = 50;
 const LABEL_ZOOM_THRESHOLD = 9.0;
 
@@ -373,11 +374,52 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         });
 
         // Register 12 Canvas sprites & GeoJSON symbol layer (glyphs-free)
+        map.on('styleimagemissing', (e) => {
+          ensureClusterSprite(map, e.id);
+        });
         registerSpotSprites(map);
         if (!map.getSource(SPOTS_SOURCE_ID)) {
           map.addSource(SPOTS_SOURCE_ID, {
             type: 'geojson',
             data: { type: 'FeatureCollection', features: [] },
+            cluster: true,
+            clusterMaxZoom: 13,
+            clusterRadius: 42,
+            clusterProperties: {
+              visitedCount: ['+', ['case', ['==', ['get', 'status'], 'visited'], 1, 0]],
+              plannedCount: ['+', ['case', ['==', ['get', 'status'], 'planned'], 1, 0]],
+            },
+          });
+        }
+        if (!map.getLayer(CLUSTERS_LAYER_ID)) {
+          map.addLayer({
+            id: CLUSTERS_LAYER_ID,
+            type: 'symbol',
+            source: SPOTS_SOURCE_ID,
+            filter: ['has', 'point_count'],
+            layout: {
+              'icon-image': [
+                'concat',
+                'cluster-',
+                [
+                  'case',
+                  ['==', ['get', 'plannedCount'], 0],
+                  'visited',
+                  ['==', ['get', 'visitedCount'], 0],
+                  'planned',
+                  'mixed',
+                ],
+                '-',
+                [
+                  'case',
+                  ['>', ['get', 'point_count'], 99],
+                  '99+',
+                  ['to-string', ['get', 'point_count']],
+                ],
+              ],
+              'icon-allow-overlap': true,
+              'icon-ignore-placement': true,
+            },
           });
         }
         if (!map.getLayer(SPOTS_LAYER_ID)) {
@@ -385,16 +427,23 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             id: SPOTS_LAYER_ID,
             type: 'symbol',
             source: SPOTS_SOURCE_ID,
+            filter: ['!', ['has', 'point_count']],
             layout: {
               'icon-image': ['get', 'spriteId'],
               'icon-size': ['case', ['==', ['get', 'isSelected'], true], 1.24, 1.0],
-              'icon-allow-overlap': ['step', ['zoom'], false, 11, true],
+              'icon-allow-overlap': true,
               'icon-ignore-placement': false,
               'symbol-sort-key': ['get', 'sortKey'],
             },
           });
         }
 
+        map.on('mouseenter', CLUSTERS_LAYER_ID, () => {
+          map.getCanvas().style.cursor = 'pointer';
+        });
+        map.on('mouseleave', CLUSTERS_LAYER_ID, () => {
+          map.getCanvas().style.cursor = '';
+        });
         map.on('mouseenter', SPOTS_LAYER_ID, () => {
           map.getCanvas().style.cursor = 'pointer';
         });
@@ -418,6 +467,32 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             if (matched) {
               onSelectSpotRef.current(matched);
               return;
+            }
+          }
+        }
+
+        if (map.getLayer(CLUSTERS_LAYER_ID)) {
+          const clusterHits = map.queryRenderedFeatures(e.point, {
+            layers: [CLUSTERS_LAYER_ID],
+          });
+          const clusterFeature = clusterHits[0];
+          const clusterId = clusterFeature?.properties?.cluster_id as number | undefined;
+          if (clusterId !== undefined && clusterFeature.geometry.type === 'Point') {
+            const source = map.getSource(SPOTS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+            if (source) {
+              try {
+                const expansionZoom = await source.getClusterExpansionZoom(clusterId);
+                if (disposed) return;
+                const coords = clusterFeature.geometry.coordinates as [number, number];
+                map.easeTo({
+                  center: coords,
+                  zoom: Math.min(Math.max(expansionZoom, map.getZoom() + 1.2), 17),
+                  duration: 550,
+                });
+                return;
+              } catch {
+                // fall through
+              }
             }
           }
         }
@@ -479,6 +554,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         },
         properties: {
           spotId: spot.id,
+          status: spot.status,
           spriteId: getSpotSpriteId(spot.category, spot.status, isHybridSpot(spot)),
           isSelected,
           sortKey,
