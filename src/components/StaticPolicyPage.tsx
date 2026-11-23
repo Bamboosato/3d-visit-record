@@ -105,7 +105,7 @@ export const StaticPolicyPage: React.FC<StaticPolicyPageProps> = ({
               <h2 className="text-base font-bold text-white">3. 位置情報・添付写真・地図・検索 API の通信について</h2>
               <ul className="list-disc pl-5 space-y-1.5">
                 <li>
-                  <strong>現在地情報:</strong> 「現在地へ移動」ボタンを押した際、ブラウザの Geolocation API を用いて地図移動にのみ使用し、外部へ送信・記録しません。
+                  <strong>現在地情報:</strong> 「現在地へ移動」を押すと、ブラウザで取得した位置をもとに地図を移動します。移動先周辺の地図や地形、標高を表示するため、現在地に基づいて外部サービス（JAXA Earth API など）へデータをリクエストする場合があります。この操作だけで訪問記録が自動保存されることはありません。
                 </li>
                 <li>
                   <strong>添付写真と EXIF メタデータ:</strong> 訪問記録へ写真を追加する際、端末ブラウザ内でのみリサイズ・圧縮処理を行い、元画像に含まれる GPS 位置情報や撮影機種情報等の EXIF メタデータは再エンコードにより自動的に除去されます。日付入力補助のために撮影日時のみを端末内で読み取りますが、元画像や EXIF 位置情報を外部サーバーへ送信することはありません。
