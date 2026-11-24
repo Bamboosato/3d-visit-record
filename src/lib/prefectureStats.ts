@@ -223,9 +223,190 @@ function resolveSpatialIndex(
   return buildPrefectureSpatialIndex(geojsonOrIndex);
 }
 
+export const MAX_COASTAL_FALLBACK_METERS = 5000;
+
+const METERS_PER_DEG_LAT = 111320;
+
+const JAPAN_PREFECTURES: ReadonlyArray<{ code: string; name: string }> = [
+  { code: '01', name: '北海道' },
+  { code: '02', name: '青森県' },
+  { code: '03', name: '岩手県' },
+  { code: '04', name: '宮城県' },
+  { code: '05', name: '秋田県' },
+  { code: '06', name: '山形県' },
+  { code: '07', name: '福島県' },
+  { code: '08', name: '茨城県' },
+  { code: '09', name: '栃木県' },
+  { code: '10', name: '群馬県' },
+  { code: '11', name: '埼玉県' },
+  { code: '12', name: '千葉県' },
+  { code: '13', name: '東京都' },
+  { code: '14', name: '神奈川県' },
+  { code: '15', name: '新潟県' },
+  { code: '16', name: '富山県' },
+  { code: '17', name: '石川県' },
+  { code: '18', name: '福井県' },
+  { code: '19', name: '山梨県' },
+  { code: '20', name: '長野県' },
+  { code: '21', name: '岐阜県' },
+  { code: '22', name: '静岡県' },
+  { code: '23', name: '愛知県' },
+  { code: '24', name: '三重県' },
+  { code: '25', name: '滋賀県' },
+  { code: '26', name: '京都府' },
+  { code: '27', name: '大阪府' },
+  { code: '28', name: '兵庫県' },
+  { code: '29', name: '奈良県' },
+  { code: '30', name: '和歌山県' },
+  { code: '31', name: '鳥取県' },
+  { code: '32', name: '島根県' },
+  { code: '33', name: '岡山県' },
+  { code: '34', name: '広島県' },
+  { code: '35', name: '山口県' },
+  { code: '36', name: '徳島県' },
+  { code: '37', name: '香川県' },
+  { code: '38', name: '愛媛県' },
+  { code: '39', name: '高知県' },
+  { code: '40', name: '福岡県' },
+  { code: '41', name: '佐賀県' },
+  { code: '42', name: '長崎県' },
+  { code: '43', name: '熊本県' },
+  { code: '44', name: '大分県' },
+  { code: '45', name: '宮崎県' },
+  { code: '46', name: '鹿児島県' },
+  { code: '47', name: '沖縄県' },
+];
+
+const PREF_BY_NAME = new Map(JAPAN_PREFECTURES.map((p) => [p.name, p]));
+const PREF_NAME_REGEX = new RegExp(
+  [...JAPAN_PREFECTURES]
+    .sort((a, b) => b.name.length - a.name.length)
+    .map((p) => p.name)
+    .join('|'),
+  'g'
+);
+
+export function extractPrefecturesFromAddress(
+  addressSummary?: string
+): Array<{ code: string; name: string }> {
+  if (!addressSummary || typeof addressSummary !== 'string') return [];
+  const trimmed = addressSummary.trim();
+  if (!trimmed) return [];
+
+  const matches: Array<{ code: string; name: string }> = [];
+  const seen = new Set<string>();
+  PREF_NAME_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = PREF_NAME_REGEX.exec(trimmed)) !== null) {
+    const pref = PREF_BY_NAME.get(match[0]);
+    if (pref && !seen.has(pref.code)) {
+      seen.add(pref.code);
+      matches.push(pref);
+    }
+  }
+  return matches;
+}
+
+function isWithinJapanTerritory(lng: number, lat: number): boolean {
+  return lat >= 20 && lat <= 46.5 && lng >= 122 && lng <= 155;
+}
+
+function isPointInExpandedBBox(
+  lng: number,
+  lat: number,
+  bbox: BBox,
+  padLng: number,
+  padLat: number
+): boolean {
+  return (
+    lng >= bbox[0] - padLng &&
+    lat >= bbox[1] - padLat &&
+    lng <= bbox[2] + padLng &&
+    lat <= bbox[3] + padLat
+  );
+}
+
+function distancePointToSegmentMeters(
+  lng: number,
+  lat: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const cosLat = Math.max(0.01, Math.cos((lat * Math.PI) / 180));
+  const metersPerDegLng = METERS_PER_DEG_LAT * cosLat;
+  const axm = (ax - lng) * metersPerDegLng;
+  const aym = (ay - lat) * METERS_PER_DEG_LAT;
+  const bxm = (bx - lng) * metersPerDegLng;
+  const bym = (by - lat) * METERS_PER_DEG_LAT;
+  const dx = bxm - axm;
+  const dy = bym - aym;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) {
+    return Math.hypot(axm, aym);
+  }
+  const t = Math.max(0, Math.min(1, -(axm * dx + aym * dy) / lenSq));
+  return Math.hypot(axm + t * dx, aym + t * dy);
+}
+
+export function findNearestPrefectureWithinDistance(
+  point: [number, number],
+  geojsonOrIndex: PrefectureFeatureCollection | PrefectureSpatialIndex,
+  maxDistanceMeters: number = MAX_COASTAL_FALLBACK_METERS
+): { code: string; name: string } | null {
+  if (!Array.isArray(point) || point.length < 2) return null;
+  const [lng, lat] = point;
+  if (
+    !Number.isFinite(lng) ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(maxDistanceMeters) ||
+    maxDistanceMeters <= 0
+  ) {
+    return null;
+  }
+
+  const index = resolveSpatialIndex(geojsonOrIndex);
+  const padLat = maxDistanceMeters / METERS_PER_DEG_LAT;
+  const cosLat = Math.max(0.01, Math.cos((lat * Math.PI) / 180));
+  const padLng = maxDistanceMeters / (METERS_PER_DEG_LAT * cosLat);
+
+  let bestDist = maxDistanceMeters;
+  let bestMatch: { code: string; name: string } | null = null;
+
+  for (const pref of index.features) {
+    if (!isPointInExpandedBBox(lng, lat, pref.bbox, padLng, padLat)) continue;
+
+    for (const poly of pref.polygons) {
+      if (!isPointInExpandedBBox(lng, lat, poly.bbox, padLng, padLat)) continue;
+
+      for (const ring of poly.rings) {
+        if (ring.length < 2) continue;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const dist = distancePointToSegmentMeters(
+            lng,
+            lat,
+            ring[j][0],
+            ring[j][1],
+            ring[i][0],
+            ring[i][1]
+          );
+          if (dist <= bestDist) {
+            bestDist = dist;
+            bestMatch = { code: pref.code, name: pref.name };
+          }
+        }
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
 export function findPrefectureForPoint(
   point: [number, number],
-  geojsonOrIndex: PrefectureFeatureCollection | PrefectureSpatialIndex
+  geojsonOrIndex: PrefectureFeatureCollection | PrefectureSpatialIndex,
+  options?: { maxFallbackDistanceMeters?: number }
 ): { code: string; name: string } | null {
   if (!Array.isArray(point) || point.length < 2) return null;
   const [lng, lat] = point;
@@ -244,7 +425,41 @@ export function findPrefectureForPoint(
     }
   }
 
+  const fallbackMeters = options?.maxFallbackDistanceMeters ?? MAX_COASTAL_FALLBACK_METERS;
+  if (fallbackMeters > 0) {
+    return findNearestPrefectureWithinDistance(point, index, fallbackMeters);
+  }
+
   return null;
+}
+
+export function resolvePrefectureForSpot(
+  spot: Pick<VisitSpot, 'center' | 'addressSummary'>,
+  geojsonOrIndex: PrefectureFeatureCollection | PrefectureSpatialIndex,
+  options?: { maxFallbackDistanceMeters?: number }
+): { code: string; name: string } | null {
+  if (!Array.isArray(spot.center) || spot.center.length < 2) return null;
+  const [lng, lat] = spot.center;
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+
+  const index = resolveSpatialIndex(geojsonOrIndex);
+  const addressCandidates = isWithinJapanTerritory(lng, lat)
+    ? extractPrefecturesFromAddress(spot.addressSummary)
+    : [];
+
+  if (addressCandidates.length === 1) {
+    return addressCandidates[0];
+  }
+
+  if (addressCandidates.length > 1) {
+    const pointMatch = findPrefectureForPoint(spot.center, index, options);
+    if (pointMatch && addressCandidates.some((c) => c.code === pointMatch.code)) {
+      return pointMatch;
+    }
+    return addressCandidates[0];
+  }
+
+  return findPrefectureForPoint(spot.center, index, options);
 }
 
 export function computePrefectureStats(
@@ -259,7 +474,7 @@ export function computePrefectureStats(
   }
 
   for (const spot of spots) {
-    const matched = findPrefectureForPoint(spot.center, index);
+    const matched = resolvePrefectureForSpot(spot, index);
     if (!matched) continue;
     const counts = countsByCode.get(matched.code);
     if (!counts) continue;

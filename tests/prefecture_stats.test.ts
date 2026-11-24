@@ -5,11 +5,13 @@ import {
   buildColoredPrefectureGeoJson,
   buildPrefectureSpatialIndex,
   computePrefectureStats,
+  extractPrefecturesFromAddress,
   findPrefectureForPoint,
   isPointInPolygon,
   loadPrefectureSpatialIndex,
   PREFECTURE_GEOJSON_URL,
   resetPrefectureLoaderCacheForTesting,
+  resolvePrefectureForSpot,
   type PrefectureFeatureCollection,
 } from '../src/lib/prefectureStats';
 import type { VisitSpot } from '../src/types/visit';
@@ -22,7 +24,8 @@ function makeSpot(
   id: string,
   name: string,
   status: VisitSpot['status'],
-  center: [number, number]
+  center: [number, number],
+  addressSummary?: string
 ): VisitSpot {
   return {
     id,
@@ -32,6 +35,7 @@ function makeSpot(
     center,
     elevation: null,
     camera: { zoom: 12, pitch: 45, bearing: 0 },
+    addressSummary,
     isPinned: false,
     entries: [
       {
@@ -82,10 +86,17 @@ describe('prefectureStats', () => {
       { label: '利尻山', point: [141.2419, 45.1786], code: '01', name: '北海道' },
       { label: '石垣島', point: [124.18, 24.38], code: '47', name: '沖縄県' },
       { label: '富士山', point: [138.7274, 35.3606], code: '22', name: '静岡県' },
+      // Coastal, reclaimed, and small island spots recovered by s0010 detail
+      { label: '東京ディズニーランド', point: [139.8804, 35.6329], code: '12', name: '千葉県' },
+      { label: '中部国際空港', point: [136.8054, 34.8584], code: '23', name: '愛知県' },
+      { label: '江の島', point: [139.4803, 35.3], code: '14', name: '神奈川県' },
+      { label: '竹富島', point: [124.088, 24.327], code: '47', name: '沖縄県' },
+      { label: '小笠原父島', point: [142.1917, 27.0944], code: '13', name: '東京都' },
+      { label: '直島', point: [133.9958, 34.46], code: '37', name: '香川県' },
     ];
 
     for (const tc of domesticCases) {
-      expect(findPrefectureForPoint(tc.point, index), tc.label).toEqual({
+      expect(findPrefectureForPoint(tc.point, index, { maxFallbackDistanceMeters: 0 }), tc.label).toEqual({
         code: tc.code,
         name: tc.name,
       });
@@ -93,8 +104,91 @@ describe('prefectureStats', () => {
 
     expect(findPrefectureForPoint([145.0, 30.0], index)).toBeNull(); // Pacific Ocean
     expect(findPrefectureForPoint([134.0, 38.0], index)).toBeNull(); // Sea of Japan
+    expect(findPrefectureForPoint([141.0, 35.9], index)).toBeNull(); // ~21 km offshore Kashima-nada
     expect(findPrefectureForPoint([2.2945, 48.8584], index)).toBeNull(); // Paris
     expect(findPrefectureForPoint([Number.NaN, 35.68], index)).toBeNull();
+  });
+
+  it('rescues nearshore points within 5km coastal buffer while excluding distant offshore points', () => {
+    const index = buildPrefectureSpatialIndex(prefectureGeoJson);
+
+    // ~1.6 km off Cape Inubosaki & Enoshima
+    expect(
+      findPrefectureForPoint([140.885, 35.706], index, { maxFallbackDistanceMeters: 0 })
+    ).toBeNull();
+    expect(findPrefectureForPoint([140.885, 35.706], index)).toEqual({
+      code: '12',
+      name: '千葉県',
+    });
+
+    expect(
+      findPrefectureForPoint([139.4803, 35.284], index, { maxFallbackDistanceMeters: 0 })
+    ).toBeNull();
+    expect(findPrefectureForPoint([139.4803, 35.284], index)).toEqual({
+      code: '14',
+      name: '神奈川県',
+    });
+
+    // ~21 km offshore remains null even with 5km fallback
+    expect(findPrefectureForPoint([141.0, 35.9], index)).toBeNull();
+  });
+
+  it('resolves spots with 3-layer priority (single address, single-side border disambiguation, and territory guard)', () => {
+    const index = buildPrefectureSpatialIndex(prefectureGeoJson);
+
+    expect(extractPrefecturesFromAddress('千葉県浦安市')).toEqual([
+      { code: '12', name: '千葉県' },
+    ]);
+    expect(extractPrefecturesFromAddress('山梨県・静岡県')).toEqual([
+      { code: '19', name: '山梨県' },
+      { code: '22', name: '静岡県' },
+    ]);
+    expect(extractPrefecturesFromAddress('東京都府中市')).toEqual([
+      { code: '13', name: '東京都' },
+    ]);
+
+    // Border spot whose coordinate falls on Nagano side, rescued to Gunma via single-prefecture address
+    const borderGunmaSpot = makeSpot(
+      'border-gunma',
+      '碓氷峠見晴台(群馬側)',
+      'visited',
+      [138.65, 36.355],
+      '群馬県安中市'
+    );
+    expect(resolvePrefectureForSpot(borderGunmaSpot, index)).toEqual({
+      code: '10',
+      name: '群馬県',
+    });
+
+    // Multi-prefecture addressSummary counts 1 prefecture matching coordinate side (Option A)
+    const fujiSpot = makeSpot(
+      'fuji',
+      '富士山',
+      'visited',
+      [138.7274, 35.3606],
+      '山梨県・静岡県'
+    );
+    expect(resolvePrefectureForSpot(fujiSpot, index)).toEqual({
+      code: '22',
+      name: '静岡県',
+    });
+
+    // Overseas coordinate with Japanese text in addressSummary is rejected by territory guard
+    const overseasWithJpText = makeSpot(
+      'paris-jp',
+      '東京記念通り',
+      'visited',
+      [2.2945, 48.8584],
+      '東京都友好公園'
+    );
+    expect(resolvePrefectureForSpot(overseasWithJpText, index)).toBeNull();
+
+    const stats = computePrefectureStats([borderGunmaSpot, fujiSpot, overseasWithJpText], index);
+    expect(stats.visitedCount).toBe(2); // 群馬県 + 静岡県 (not 山梨県, not 東京都)
+    expect(stats.byCode['10'].status).toBe('visited');
+    expect(stats.byCode['22'].status).toBe('visited');
+    expect(stats.byCode['19'].status).toBe('none');
+    expect(stats.byCode['13'].status).toBe('none');
   });
 
   it('handles polygon holes and outer edges deterministically in isPointInPolygon', () => {
