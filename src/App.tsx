@@ -19,6 +19,7 @@ import { SpotDetailSheet, type PendingPhotoDraft } from './components/SpotDetail
 import { SpotNavDrawer } from './components/SpotNavDrawer';
 import { CloudSyncDialog } from './components/CloudSyncDialog';
 import { LayerMenu } from './components/LayerMenu';
+import { PrefectureSummaryLegend } from './components/PrefectureSummaryLegend';
 import { StaticPolicyPage } from './components/StaticPolicyPage';
 import { PhotoProposalCard, type PhotoProposalState } from './components/PhotoProposalCard';
 import { DEFAULT_INITIAL_CAMERA } from './lib/maplibreHelper';
@@ -1383,39 +1384,9 @@ export const App: React.FC = () => {
         <aside
           data-testid="prefecture-legend-badge"
           aria-label="都道府県塗りつぶし凡例"
-          className="pointer-events-auto fixed z-10 safe-top-left-dropdown rounded-xl bg-slate-900/90 backdrop-blur-md border border-slate-700/80 shadow-lg px-2.5 py-2 text-[11px] text-slate-100 space-y-1 max-w-[calc(100vw-1.5rem)]"
+          className="pointer-events-auto fixed z-10 safe-top-left-dropdown rounded-xl bg-slate-900/90 backdrop-blur-md border border-slate-700/80 shadow-lg px-3 py-2 text-[11px] text-slate-100"
         >
-          <div className="flex items-center gap-2 font-bold">
-            <span className="text-emerald-300 tabular-nums">
-              {prefectureStats.visitedCount} / {prefectureStats.totalPrefectures} 都道府県
-            </span>
-            <span className="text-amber-300 tabular-nums font-semibold">
-              予定 {prefectureStats.plannedOnlyCount}
-            </span>
-          </div>
-          <div className="flex items-center gap-2.5 text-[10px] text-slate-300">
-            <span className="inline-flex items-center gap-1">
-              <span
-                className="w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-300/80 shrink-0"
-                aria-hidden="true"
-              />
-              <span>訪問済み</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span
-                className="w-2 h-2 rounded-full bg-amber-500 ring-1 ring-amber-300/80 shrink-0"
-                aria-hidden="true"
-              />
-              <span>予定</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span
-                className="w-2 h-2 rounded-full bg-slate-500/80 ring-1 ring-slate-300/60 shrink-0"
-                aria-hidden="true"
-              />
-              <span>未訪問</span>
-            </span>
-          </div>
+          <PrefectureSummaryLegend stats={prefectureStats} compact />
         </aside>
       )}
 

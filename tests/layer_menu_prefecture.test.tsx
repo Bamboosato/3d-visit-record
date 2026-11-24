@@ -2,6 +2,7 @@ import React from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LayerMenu } from '../src/components/LayerMenu';
+import { PrefectureSummaryLegend } from '../src/components/PrefectureSummaryLegend';
 import type { PrefectureStats, WebGPUStatus } from '../src/types/visit';
 
 const SAMPLE_GPU: WebGPUStatus = {
@@ -54,7 +55,7 @@ describe('LayerMenu prefecture fill overlay toggle', () => {
     expect(onTogglePrefectureFill).toHaveBeenCalledWith(true);
   });
 
-  it('shows summary counts and 3-color legend when enabled with stats', () => {
+  it('shows vertical summary counts with right-aligned tabular numerals when enabled with stats', () => {
     render(
       <LayerMenu
         exaggeration={1.5}
@@ -76,11 +77,45 @@ describe('LayerMenu prefecture fill overlay toggle', () => {
     expect(toggle.checked).toBe(true);
 
     const summary = screen.getByTestId('layer-menu-prefecture-summary');
-    expect(summary.textContent).toContain('訪問済み 12 / 47 都道府県');
-    expect(summary.textContent).toContain('予定のみ 3');
-    expect(summary.textContent).toContain('訪問済み');
-    expect(summary.textContent).toContain('予定のみ');
-    expect(summary.textContent).toContain('未訪問');
+    expect(summary.textContent).toContain('都道府県(47)');
+
+    const terms = Array.from(summary.querySelectorAll('dt')).map((el) =>
+      el.textContent?.trim()
+    );
+    const definitions = Array.from(summary.querySelectorAll('dd'));
+    expect(terms).toEqual(['訪問済み', '予定あり', '未訪問']);
+    expect(definitions.map((el) => el.textContent?.trim())).toEqual(['12', '3', '32']);
+    for (const dd of definitions) {
+      expect(dd.className).toContain('text-right');
+      expect(dd.className).toContain('tabular-nums');
+    }
+  });
+
+  it('renders compact PrefectureSummaryLegend without progress bar and preserves 1-digit/2-digit alignment', () => {
+    const compactStats: PrefectureStats = {
+      totalPrefectures: 47,
+      visitedCount: 14,
+      plannedOnlyCount: 8,
+      unvisitedCount: 0,
+      byCode: {},
+      items: [],
+    };
+
+    const { container } = render(<PrefectureSummaryLegend stats={compactStats} compact />);
+
+    expect(screen.getByText('都道府県(47)')).toBeTruthy();
+    expect(container.querySelector('.h-1\\.5')).toBeNull();
+
+    const terms = Array.from(container.querySelectorAll('dt')).map((el) =>
+      el.textContent?.trim()
+    );
+    const definitions = Array.from(container.querySelectorAll('dd'));
+    expect(terms).toEqual(['訪問済み', '予定あり', '未訪問']);
+    expect(definitions.map((el) => el.textContent?.trim())).toEqual(['14', '8', '0']);
+    for (const dd of definitions) {
+      expect(dd.className).toContain('text-right');
+      expect(dd.className).toContain('tabular-nums');
+    }
   });
 
   it('shows loading and retry UI cleanly when loading or errored', () => {

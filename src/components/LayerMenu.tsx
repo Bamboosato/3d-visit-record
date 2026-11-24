@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { BaseMapId, PrefectureStats, WebGPUStatus } from '../types/visit';
 import { BASE_MAP_SOURCES } from '../lib/maplibreHelper';
+import { PrefectureSummaryLegend } from './PrefectureSummaryLegend';
 
 const SUPPORTS_NATIVE_SWITCH =
   typeof HTMLInputElement !== 'undefined' && 'switch' in HTMLInputElement.prototype;
@@ -215,63 +216,7 @@ export const LayerMenu: React.FC<LayerMenuProps> = ({
                 )}
 
                 {prefectureStats && (
-                  <>
-                    <div className="flex items-center justify-between gap-2 text-[11px]">
-                      <span className="font-semibold text-emerald-300 tabular-nums">
-                        訪問済み {prefectureStats.visitedCount} /{' '}
-                        {prefectureStats.totalPrefectures} 都道府県
-                      </span>
-                      <span className="font-semibold text-amber-300 tabular-nums">
-                        予定のみ {prefectureStats.plannedOnlyCount}
-                      </span>
-                    </div>
-
-                    <div
-                      className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden flex"
-                      aria-hidden="true"
-                    >
-                      {prefectureStats.totalPrefectures > 0 && (
-                        <>
-                          <div
-                            className="h-full bg-emerald-500 transition-[width] duration-300"
-                            style={{
-                              width: `${(prefectureStats.visitedCount / prefectureStats.totalPrefectures) * 100}%`,
-                            }}
-                          />
-                          <div
-                            className="h-full bg-amber-500 transition-[width] duration-300"
-                            style={{
-                              width: `${(prefectureStats.plannedOnlyCount / prefectureStats.totalPrefectures) * 100}%`,
-                            }}
-                          />
-                        </>
-                      )}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300 pt-0.5">
-                      <span className="inline-flex items-center gap-1">
-                        <span
-                          className="w-2.5 h-2.5 rounded-sm bg-emerald-500/75 border border-emerald-400 shrink-0"
-                          aria-hidden="true"
-                        />
-                        <span>訪問済み</span>
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <span
-                          className="w-2.5 h-2.5 rounded-sm bg-amber-500/75 border border-amber-400 shrink-0"
-                          aria-hidden="true"
-                        />
-                        <span>予定のみ</span>
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <span
-                          className="w-2.5 h-2.5 rounded-sm bg-slate-600/45 border border-slate-400/70 shrink-0"
-                          aria-hidden="true"
-                        />
-                        <span>未訪問</span>
-                      </span>
-                    </div>
-                  </>
+                  <PrefectureSummaryLegend stats={prefectureStats} showProgressBar />
                 )}
               </div>
             )}

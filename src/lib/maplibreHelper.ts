@@ -365,7 +365,10 @@ export function createMapInstance(
 
 export const PREFECTURE_SOURCE_ID = 'japan-prefectures-source';
 export const PREFECTURE_FILL_LAYER_ID = 'japan-prefectures-fill';
+export const PREFECTURE_LINE_CASING_LAYER_ID = 'japan-prefectures-line-casing';
 export const PREFECTURE_LINE_LAYER_ID = 'japan-prefectures-line';
+
+const PREFECTURE_CASING_COLOR = '#0f172a';
 
 function buildPrefectureFillColorExpression(): maplibregl.ExpressionSpecification {
   return ['match', ['get', 'status'], 'visited', '#10b981', 'planned', '#f59e0b', '#475569'];
@@ -375,36 +378,63 @@ function buildPrefectureFillOpacityExpression(): maplibregl.ExpressionSpecificat
   return ['match', ['get', 'status'], 'visited', 0.42, 'planned', 0.4, 0.08];
 }
 
-function buildPrefectureLineColorExpression(
-  baseMap: BaseMapId
-): maplibregl.ExpressionSpecification {
-  return [
-    'match',
-    ['get', 'status'],
-    'visited',
-    '#34d399',
-    'planned',
-    '#fbbf24',
-    baseMap === 'hillshade' ? '#475569' : '#e2e8f0',
-  ];
+function buildPrefectureCasingWidthExpression(): maplibregl.ExpressionSpecification {
+  return ['interpolate', ['linear'], ['zoom'], 4, 2.4, 8, 3.4, 11, 4.2];
 }
 
-function buildPrefectureLineWidthExpression(): maplibregl.ExpressionSpecification {
-  return ['match', ['get', 'status'], 'visited', 1.6, 'planned', 1.5, 1.0];
+function buildPrefectureCasingOpacityExpression(): maplibregl.ExpressionSpecification {
+  return ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.65];
 }
 
-function buildPrefectureLineOpacityExpression(
-  baseMap: BaseMapId
-): maplibregl.ExpressionSpecification {
-  return [
-    'match',
-    ['get', 'status'],
-    'visited',
-    0.9,
-    'planned',
-    0.9,
-    baseMap === 'hillshade' ? 0.6 : 0.55,
-  ];
+function buildPrefectureCoreLineColorExpression(): maplibregl.ExpressionSpecification {
+  return ['match', ['get', 'status'], 'visited', '#ffffff', 'planned', '#ffffff', '#e2e8f0'];
+}
+
+function buildPrefectureCoreLineWidthExpression(): maplibregl.ExpressionSpecification {
+  return ['interpolate', ['linear'], ['zoom'], 4, 1.0, 8, 1.5, 11, 2.0];
+}
+
+function buildPrefectureCoreLineOpacityExpression(): maplibregl.ExpressionSpecification {
+  return ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.75];
+}
+
+type PrefectureLinePaint = {
+  'line-color': string | maplibregl.ExpressionSpecification;
+  'line-width': maplibregl.ExpressionSpecification;
+  'line-opacity': maplibregl.ExpressionSpecification;
+};
+
+function ensurePrefectureLineLayer(
+  map: maplibregl.Map,
+  layerId: string,
+  paint: PrefectureLinePaint,
+  beforeId?: string
+): void {
+  if (!map.getLayer(layerId)) {
+    map.addLayer(
+      {
+        id: layerId,
+        type: 'line',
+        source: PREFECTURE_SOURCE_ID,
+        layout: {
+          visibility: 'visible',
+          'line-join': 'round',
+          'line-cap': 'round',
+        },
+        paint,
+      },
+      beforeId
+    );
+    return;
+  }
+
+  map.setLayoutProperty(layerId, 'visibility', 'visible');
+  for (const prop of Object.keys(paint) as Array<keyof PrefectureLinePaint>) {
+    map.setPaintProperty(layerId, prop, paint[prop]);
+  }
+  if (beforeId) {
+    map.moveLayer(layerId, beforeId);
+  }
 }
 
 export function syncPrefectureOverlayLayers(
@@ -416,14 +446,17 @@ export function syncPrefectureOverlayLayers(
     beforeLayerId?: string;
   }
 ): void {
-  const { enabled, data, baseMap, beforeLayerId } = options;
+  const { enabled, data, beforeLayerId } = options;
 
   if (!enabled || !data) {
-    if (map.getLayer(PREFECTURE_FILL_LAYER_ID)) {
-      map.setLayoutProperty(PREFECTURE_FILL_LAYER_ID, 'visibility', 'none');
-    }
-    if (map.getLayer(PREFECTURE_LINE_LAYER_ID)) {
-      map.setLayoutProperty(PREFECTURE_LINE_LAYER_ID, 'visibility', 'none');
+    for (const layerId of [
+      PREFECTURE_FILL_LAYER_ID,
+      PREFECTURE_LINE_CASING_LAYER_ID,
+      PREFECTURE_LINE_LAYER_ID,
+    ]) {
+      if (map.getLayer(layerId)) {
+        map.setLayoutProperty(layerId, 'visibility', 'none');
+      }
     }
     return;
   }
@@ -464,34 +497,25 @@ export function syncPrefectureOverlayLayers(
     }
   }
 
-  const lineColorExpr = buildPrefectureLineColorExpression(baseMap);
-  const lineOpacityExpr = buildPrefectureLineOpacityExpression(baseMap);
+  ensurePrefectureLineLayer(
+    map,
+    PREFECTURE_LINE_CASING_LAYER_ID,
+    {
+      'line-color': PREFECTURE_CASING_COLOR,
+      'line-width': buildPrefectureCasingWidthExpression(),
+      'line-opacity': buildPrefectureCasingOpacityExpression(),
+    },
+    resolvedBeforeId
+  );
 
-  if (!map.getLayer(PREFECTURE_LINE_LAYER_ID)) {
-    map.addLayer(
-      {
-        id: PREFECTURE_LINE_LAYER_ID,
-        type: 'line',
-        source: PREFECTURE_SOURCE_ID,
-        layout: {
-          visibility: 'visible',
-          'line-join': 'round',
-          'line-cap': 'round',
-        },
-        paint: {
-          'line-color': lineColorExpr,
-          'line-width': buildPrefectureLineWidthExpression(),
-          'line-opacity': lineOpacityExpr,
-        },
-      },
-      resolvedBeforeId
-    );
-  } else {
-    map.setLayoutProperty(PREFECTURE_LINE_LAYER_ID, 'visibility', 'visible');
-    map.setPaintProperty(PREFECTURE_LINE_LAYER_ID, 'line-color', lineColorExpr);
-    map.setPaintProperty(PREFECTURE_LINE_LAYER_ID, 'line-opacity', lineOpacityExpr);
-    if (resolvedBeforeId) {
-      map.moveLayer(PREFECTURE_LINE_LAYER_ID, resolvedBeforeId);
-    }
-  }
+  ensurePrefectureLineLayer(
+    map,
+    PREFECTURE_LINE_LAYER_ID,
+    {
+      'line-color': buildPrefectureCoreLineColorExpression(),
+      'line-width': buildPrefectureCoreLineWidthExpression(),
+      'line-opacity': buildPrefectureCoreLineOpacityExpression(),
+    },
+    resolvedBeforeId
+  );
 }
