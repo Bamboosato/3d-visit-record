@@ -13,8 +13,11 @@ import {
   createMapInstance,
   DEFAULT_INITIAL_CAMERA,
   initGraphicsBackend,
+  PREFECTURE_SOURCE_ID,
   registerVisitMapProtocols,
+  syncPrefectureOverlayLayers,
 } from '../lib/maplibreHelper';
+import type { PrefectureFeatureCollection } from '../lib/prefectureStats';
 import { ensureClusterSprite, getSpotSpriteId, registerSpotSprites } from '../lib/spotCategories';
 import { isHybridSpot, matchesStatusFilter } from '../lib/spotDomain';
 
@@ -34,6 +37,8 @@ interface MapViewerProps {
   selectedSpotId: string | null;
   exaggeration: number;
   baseMap: BaseMapId;
+  prefectureFillEnabled?: boolean;
+  prefectureGeoJson?: PrefectureFeatureCollection | null;
   inspectedPoint: InspectedPoint | null;
   onStatusChange: (status: WebGPUStatus) => void;
   onTileLoadingChange?: (loading: boolean) => void;
@@ -62,6 +67,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   selectedSpotId,
   exaggeration,
   baseMap,
+  prefectureFillEnabled = false,
+  prefectureGeoJson = null,
   inspectedPoint,
   onStatusChange,
   onTileLoadingChange,
@@ -83,6 +90,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const latestSelectedIdRef = useRef<string | null>(selectedSpotId);
   const latestExaggerationRef = useRef<number>(exaggeration);
   const latestBaseMapRef = useRef<BaseMapId>(baseMap);
+  const latestPrefectureFillEnabledRef = useRef<boolean>(prefectureFillEnabled);
+  const latestPrefectureGeoJsonRef = useRef<PrefectureFeatureCollection | null>(
+    prefectureGeoJson
+  );
 
   const onInspectEmptyPointRef = useRef(onInspectEmptyPoint);
   const onSelectSpotRef = useRef(onSelectSpot);
@@ -95,6 +106,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   latestSelectedIdRef.current = selectedSpotId;
   latestExaggerationRef.current = exaggeration;
   latestBaseMapRef.current = baseMap;
+  latestPrefectureFillEnabledRef.current = prefectureFillEnabled;
+  latestPrefectureGeoJsonRef.current = prefectureGeoJson;
   onInspectEmptyPointRef.current = onInspectEmptyPoint;
   onSelectSpotRef.current = onSelectSpot;
   onCameraChangeRef.current = onCameraChange;
@@ -454,6 +467,27 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         setMapReady(true);
       });
 
+      map.on('styledata', () => {
+        if (disposed || !map.isStyleLoaded()) return;
+        if (
+          latestPrefectureFillEnabledRef.current &&
+          latestPrefectureGeoJsonRef.current &&
+          !map.getSource(PREFECTURE_SOURCE_ID)
+        ) {
+          const beforeLayerId = map.getLayer(CLUSTERS_LAYER_ID)
+            ? CLUSTERS_LAYER_ID
+            : map.getLayer(SPOTS_LAYER_ID)
+              ? SPOTS_LAYER_ID
+              : undefined;
+          syncPrefectureOverlayLayers(map, {
+            enabled: true,
+            data: latestPrefectureGeoJsonRef.current,
+            baseMap: latestBaseMapRef.current,
+            beforeLayerId,
+          });
+        }
+      });
+
       map.on('click', async (e) => {
         if (disposed) return;
 
@@ -588,6 +622,23 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       }
     });
   }, [baseMap, mapReady]);
+
+  // Sync prefecture polygon overlay below spot clusters/pins
+  useEffect(() => {
+    const map = internalMapRef.current;
+    if (!map || !mapReady) return;
+    const beforeLayerId = map.getLayer(CLUSTERS_LAYER_ID)
+      ? CLUSTERS_LAYER_ID
+      : map.getLayer(SPOTS_LAYER_ID)
+        ? SPOTS_LAYER_ID
+        : undefined;
+    syncPrefectureOverlayLayers(map, {
+      enabled: prefectureFillEnabled,
+      data: prefectureGeoJson,
+      baseMap,
+      beforeLayerId,
+    });
+  }, [prefectureFillEnabled, prefectureGeoJson, baseMap, mapReady]);
 
   // Single DOM marker for unregistered inspected point
   useEffect(() => {

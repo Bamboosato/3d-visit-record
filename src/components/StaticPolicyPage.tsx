@@ -184,6 +184,17 @@ export const StaticPolicyPage: React.FC<StaticPolicyPageProps> = ({
                   <strong>衛星航空写真:</strong> Esri World Imagery（Esri, Maxar, Earthstar Geographics）
                 </li>
                 <li>
+                  <strong>都道府県境界データ:</strong> 国土交通省「国土数値情報（行政区域データ）」を加工して作成（CC BY 4.0） —{' '}
+                  <a
+                    href="https://nlftp.mlit.go.jp/ksj/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sky-400 underline"
+                  >
+                    国土数値情報
+                  </a>
+                </li>
+                <li>
                   <strong>3D 地図描画エンジン:</strong> MapLibre GL JS
                 </li>
               </ul>

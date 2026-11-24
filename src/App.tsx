@@ -64,6 +64,12 @@ import {
   shareOrCopyUrl,
 } from './lib/urlSync';
 import { runViewTransition } from './lib/viewTransition';
+import {
+  buildColoredPrefectureGeoJson,
+  computePrefectureStats,
+  loadPrefectureSpatialIndex,
+  type PrefectureSpatialIndex,
+} from './lib/prefectureStats';
 import { getVisitDateRange } from './lib/visitDate';
 import {
   MAX_ENTRIES_PER_SPOT,
@@ -138,6 +144,13 @@ export const App: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(
     () => initialUiPrefsRef.current.statusFilter
   );
+  const [prefectureFillEnabled, setPrefectureFillEnabled] = useState<boolean>(
+    () => initialUiPrefsRef.current.prefectureFillEnabled
+  );
+  const [prefectureIndex, setPrefectureIndex] = useState<PrefectureSpatialIndex | null>(null);
+  const [isPrefectureLoading, setIsPrefectureLoading] = useState(false);
+  const [prefectureLoadError, setPrefectureLoadError] = useState<string | null>(null);
+  const [prefectureLoadNonce, setPrefectureLoadNonce] = useState(0);
 
   const [gpuStatus, setGpuStatus] = useState<WebGPUStatus>({
     backend: 'webgpu',
@@ -238,8 +251,42 @@ export const App: React.FC = () => {
 
   // Persist UI preferences
   useEffect(() => {
-    saveUiPreferences({ baseMap, exaggeration, statusFilter });
-  }, [baseMap, exaggeration, statusFilter]);
+    saveUiPreferences({ baseMap, exaggeration, statusFilter, prefectureFillEnabled });
+  }, [baseMap, exaggeration, statusFilter, prefectureFillEnabled]);
+
+  // Lazy-load 47-prefecture GeoJSON only when fill overlay is turned ON
+  useEffect(() => {
+    if (!prefectureFillEnabled || prefectureIndex) return;
+    let cancelled = false;
+    setIsPrefectureLoading(true);
+    setPrefectureLoadError(null);
+    void loadPrefectureSpatialIndex()
+      .then((index) => {
+        if (cancelled) return;
+        setPrefectureIndex(index);
+        setIsPrefectureLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setIsPrefectureLoading(false);
+        setPrefectureLoadError(
+          err instanceof Error ? err.message : '都道府県データの読み込みに失敗しました。'
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefectureFillEnabled, prefectureIndex, prefectureLoadNonce]);
+
+  const prefectureStats = useMemo(() => {
+    if (!prefectureFillEnabled || !prefectureIndex) return null;
+    return computePrefectureStats(appState.spots, prefectureIndex);
+  }, [prefectureFillEnabled, prefectureIndex, appState.spots]);
+
+  const coloredPrefectureGeoJson = useMemo(() => {
+    if (!prefectureFillEnabled || !prefectureIndex || !prefectureStats) return null;
+    return buildColoredPrefectureGeoJson(prefectureIndex, prefectureStats);
+  }, [prefectureFillEnabled, prefectureIndex, prefectureStats]);
 
   const selectedSpot = useMemo(
     () => appState.spots.find((s) => s.id === selectedSpotId) ?? null,
@@ -1155,6 +1202,8 @@ export const App: React.FC = () => {
         selectedSpotId={selectedSpotId}
         exaggeration={exaggeration}
         baseMap={baseMap}
+        prefectureFillEnabled={prefectureFillEnabled}
+        prefectureGeoJson={coloredPrefectureGeoJson}
         inspectedPoint={inspectedPoint}
         onStatusChange={setGpuStatus}
         onTileLoadingChange={setIsMapLoading}
@@ -1295,6 +1344,12 @@ export const App: React.FC = () => {
             onChangeExaggeration={setExaggeration}
             baseMap={baseMap}
             onChangeBaseMap={setBaseMap}
+            prefectureFillEnabled={prefectureFillEnabled}
+            onTogglePrefectureFill={setPrefectureFillEnabled}
+            prefectureStats={prefectureStats}
+            isPrefectureLoading={isPrefectureLoading}
+            prefectureLoadError={prefectureLoadError}
+            onRetryPrefectureLoad={() => setPrefectureLoadNonce((n) => n + 1)}
             gpuStatus={gpuStatus}
             isOpen={isLayerOpen}
             onToggleOpen={openLayer}
@@ -1322,6 +1377,47 @@ export const App: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {/* Compact Prefecture Fill Legend & Achievement Badge (only when overlay ON) */}
+      {prefectureFillEnabled && prefectureStats && !isNavOpen && !isFilterMenuOpen && (
+        <aside
+          data-testid="prefecture-legend-badge"
+          aria-label="都道府県塗りつぶし凡例"
+          className="pointer-events-auto fixed z-10 safe-top-left-dropdown rounded-xl bg-slate-900/90 backdrop-blur-md border border-slate-700/80 shadow-lg px-2.5 py-2 text-[11px] text-slate-100 space-y-1 max-w-[calc(100vw-1.5rem)]"
+        >
+          <div className="flex items-center gap-2 font-bold">
+            <span className="text-emerald-300 tabular-nums">
+              {prefectureStats.visitedCount} / {prefectureStats.totalPrefectures} 都道府県
+            </span>
+            <span className="text-amber-300 tabular-nums font-semibold">
+              予定 {prefectureStats.plannedOnlyCount}
+            </span>
+          </div>
+          <div className="flex items-center gap-2.5 text-[10px] text-slate-300">
+            <span className="inline-flex items-center gap-1">
+              <span
+                className="w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-emerald-300/80 shrink-0"
+                aria-hidden="true"
+              />
+              <span>訪問済み</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span
+                className="w-2 h-2 rounded-full bg-amber-500 ring-1 ring-amber-300/80 shrink-0"
+                aria-hidden="true"
+              />
+              <span>予定</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span
+                className="w-2 h-2 rounded-full bg-slate-500/80 ring-1 ring-slate-300/60 shrink-0"
+                aria-hidden="true"
+              />
+              <span>未訪問</span>
+            </span>
+          </div>
+        </aside>
+      )}
 
       {/* Storage warning banner */}
       {storageWarning && (

@@ -94,6 +94,7 @@ export function loadUiPreferences(): UiPreferences {
     baseMap: 'osm',
     exaggeration: 1.5,
     statusFilter: 'all',
+    prefectureFillEnabled: false,
   };
   const ls = safeGetLocalStorage();
   if (!ls) return defaults;
@@ -115,7 +116,8 @@ export function loadUiPreferences(): UiPreferences {
       raw.statusFilter === 'all' || raw.statusFilter === 'visited' || raw.statusFilter === 'planned'
         ? raw.statusFilter
         : defaults.statusFilter;
-    return { baseMap, exaggeration, statusFilter };
+    const prefectureFillEnabled = raw.prefectureFillEnabled === true;
+    return { baseMap, exaggeration, statusFilter, prefectureFillEnabled };
   } catch {
     return defaults;
   }

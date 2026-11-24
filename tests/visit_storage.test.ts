@@ -139,13 +139,32 @@ describe('visitStorage', () => {
       baseMap: 'osm',
       exaggeration: 1.5,
       statusFilter: 'all',
+      prefectureFillEnabled: false,
     });
 
-    saveUiPreferences({ baseMap: 'photo', exaggeration: 2.2, statusFilter: 'planned' });
+    saveUiPreferences({
+      baseMap: 'photo',
+      exaggeration: 2.2,
+      statusFilter: 'planned',
+      prefectureFillEnabled: true,
+    });
     expect(loadUiPreferences()).toEqual({
       baseMap: 'photo',
       exaggeration: 2.2,
       statusFilter: 'planned',
+      prefectureFillEnabled: true,
+    });
+
+    // Legacy preferences without prefectureFillEnabled should default to false
+    localStorage.setItem(
+      'visit3d_ui_prefs_v1',
+      JSON.stringify({ baseMap: 'hillshade', exaggeration: 1.8, statusFilter: 'visited' })
+    );
+    expect(loadUiPreferences()).toEqual({
+      baseMap: 'hillshade',
+      exaggeration: 1.8,
+      statusFilter: 'visited',
+      prefectureFillEnabled: false,
     });
   });
 });

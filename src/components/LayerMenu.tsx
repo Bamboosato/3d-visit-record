@@ -1,13 +1,33 @@
 import React from 'react';
-import { Settings, Mountain, Layers, ChevronUp, ShieldCheck, FileText, Share2 } from 'lucide-react';
-import type { BaseMapId, WebGPUStatus } from '../types/visit';
+import {
+  Settings,
+  Mountain,
+  Layers,
+  ChevronUp,
+  ShieldCheck,
+  FileText,
+  Share2,
+  Map as MapIcon,
+  Loader2,
+  RefreshCw,
+} from 'lucide-react';
+import type { BaseMapId, PrefectureStats, WebGPUStatus } from '../types/visit';
 import { BASE_MAP_SOURCES } from '../lib/maplibreHelper';
+
+const SUPPORTS_NATIVE_SWITCH =
+  typeof HTMLInputElement !== 'undefined' && 'switch' in HTMLInputElement.prototype;
 
 interface LayerMenuProps {
   exaggeration: number;
   onChangeExaggeration: (val: number) => void;
   baseMap: BaseMapId;
   onChangeBaseMap: (id: BaseMapId) => void;
+  prefectureFillEnabled: boolean;
+  onTogglePrefectureFill: (enabled: boolean) => void;
+  prefectureStats: PrefectureStats | null;
+  isPrefectureLoading?: boolean;
+  prefectureLoadError?: string | null;
+  onRetryPrefectureLoad?: () => void;
   gpuStatus: WebGPUStatus;
   isOpen: boolean;
   onToggleOpen: () => void;
@@ -21,6 +41,12 @@ export const LayerMenu: React.FC<LayerMenuProps> = ({
   onChangeExaggeration,
   baseMap,
   onChangeBaseMap,
+  prefectureFillEnabled,
+  onTogglePrefectureFill,
+  prefectureStats,
+  isPrefectureLoading = false,
+  prefectureLoadError = null,
+  onRetryPrefectureLoad,
   gpuStatus,
   isOpen,
   onToggleOpen,
@@ -128,6 +154,127 @@ export const LayerMenu: React.FC<LayerMenuProps> = ({
                 );
               })}
             </div>
+          </div>
+
+          {/* オーバーレイ表示（日本地図塗りつぶしモード） */}
+          <div className="pt-2 border-t border-slate-800 space-y-2">
+            <div className="flex items-center gap-1.5 font-semibold text-slate-200">
+              <MapIcon className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+              <span>オーバーレイ表示</span>
+            </div>
+
+            <label
+              htmlFor="prefecture-fill-toggle"
+              className="flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-xl border border-slate-800 bg-slate-950/60 hover:border-slate-700 cursor-pointer transition-colors"
+            >
+              <span className="min-w-0">
+                <span className="block font-semibold text-slate-100">都道府県塗りつぶし</span>
+                <span className="block text-[11px] text-slate-400 mt-0.5 leading-snug">
+                  47都道府県の訪問・予定状況を色分け
+                </span>
+              </span>
+              <input
+                id="prefecture-fill-toggle"
+                type="checkbox"
+                role="switch"
+                checked={prefectureFillEnabled}
+                onChange={(e) => onTogglePrefectureFill(e.target.checked)}
+                {...({ switch: '' } as Record<string, string>)}
+                className={
+                  SUPPORTS_NATIVE_SWITCH ? 'visit-switch-native' : 'visit-switch-fallback'
+                }
+              />
+            </label>
+
+            {prefectureFillEnabled && (
+              <div
+                data-testid="layer-menu-prefecture-summary"
+                className="rounded-xl bg-slate-950/75 border border-slate-800/90 p-2.5 space-y-2"
+              >
+                {isPrefectureLoading && !prefectureStats && (
+                  <div className="flex items-center gap-1.5 text-[11px] text-sky-300">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
+                    <span>都道府県データを読み込み中...</span>
+                  </div>
+                )}
+
+                {prefectureLoadError && !isPrefectureLoading && (
+                  <div className="space-y-1.5 text-[11px] text-rose-300">
+                    <p className="leading-snug">{prefectureLoadError}</p>
+                    {onRetryPrefectureLoad && (
+                      <button
+                        type="button"
+                        onClick={onRetryPrefectureLoad}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-100 font-semibold cursor-pointer"
+                      >
+                        <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                        <span>再試行</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {prefectureStats && (
+                  <>
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-semibold text-emerald-300 tabular-nums">
+                        訪問済み {prefectureStats.visitedCount} /{' '}
+                        {prefectureStats.totalPrefectures} 都道府県
+                      </span>
+                      <span className="font-semibold text-amber-300 tabular-nums">
+                        予定のみ {prefectureStats.plannedOnlyCount}
+                      </span>
+                    </div>
+
+                    <div
+                      className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden flex"
+                      aria-hidden="true"
+                    >
+                      {prefectureStats.totalPrefectures > 0 && (
+                        <>
+                          <div
+                            className="h-full bg-emerald-500 transition-[width] duration-300"
+                            style={{
+                              width: `${(prefectureStats.visitedCount / prefectureStats.totalPrefectures) * 100}%`,
+                            }}
+                          />
+                          <div
+                            className="h-full bg-amber-500 transition-[width] duration-300"
+                            style={{
+                              width: `${(prefectureStats.plannedOnlyCount / prefectureStats.totalPrefectures) * 100}%`,
+                            }}
+                          />
+                        </>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300 pt-0.5">
+                      <span className="inline-flex items-center gap-1">
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm bg-emerald-500/75 border border-emerald-400 shrink-0"
+                          aria-hidden="true"
+                        />
+                        <span>訪問済み</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm bg-amber-500/75 border border-amber-400 shrink-0"
+                          aria-hidden="true"
+                        />
+                        <span>予定のみ</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm bg-slate-600/45 border border-slate-400/70 shrink-0"
+                          aria-hidden="true"
+                        />
+                        <span>未訪問</span>
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           {/* 3D視点リンク共有 */}

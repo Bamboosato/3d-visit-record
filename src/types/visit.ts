@@ -192,8 +192,29 @@ export interface WebGPUStatus {
   fps: number;
 }
 
+export type PrefectureVisitStatus = 'visited' | 'planned' | 'none';
+
+export interface PrefectureSummaryItem {
+  code: string;
+  name: string;
+  status: PrefectureVisitStatus;
+  visitedSpotCount: number;
+  plannedSpotCount: number;
+  totalSpotCount: number;
+}
+
+export interface PrefectureStats {
+  totalPrefectures: number;
+  visitedCount: number;
+  plannedOnlyCount: number;
+  unvisitedCount: number;
+  byCode: Record<string, PrefectureSummaryItem>;
+  items: PrefectureSummaryItem[];
+}
+
 export interface UiPreferences {
   baseMap: BaseMapId;
   exaggeration: number;
   statusFilter: StatusFilterValue;
+  prefectureFillEnabled: boolean;
 }

@@ -392,7 +392,7 @@ describe('Phase 2 photo UI components', () => {
 
     expect(screen.getByText(/リサイズ・圧縮および EXIF 除去処理/)).toBeTruthy();
     expect(screen.getByText('3D Visit Record/photos/')).toBeTruthy();
-    expect(screen.getByText(/GPS 位置情報や撮影機種情報等の EXIF メタデータは再エンコードにより自動的に除去/)).toBeTruthy();
+    expect(screen.getByText(/GPS 位置情報や撮影機種情報等の EXIF メタデータが再エンコードにより自動的に除去/)).toBeTruthy();
     expect(screen.getByText(/写真・キャプション等の個人記録は一切含めません/)).toBeTruthy();
   });
 });
