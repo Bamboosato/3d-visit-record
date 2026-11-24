@@ -2,7 +2,10 @@ import { bounded, abortableDelay } from './asyncLifecycle';
 import * as maplibregl from 'maplibre-gl';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { BaseMapId, RendererBackend, SpotCamera, WebGPUStatus } from '../types/visit';
-import type { PrefectureFeatureCollection } from './prefectureStats';
+import {
+  expandPrefecturePolygonsForRendering,
+  type PrefectureFeatureCollection,
+} from './prefectureStats';
 import { getAW3DTileGenerator, getJaxaEarth } from './jaxaClient';
 import { fetchTileBytesWithRetry, getTileWithOpfsSWR, TileHttpError } from './opfsTileCache';
 
@@ -379,11 +382,33 @@ function buildPrefectureFillOpacityExpression(): maplibregl.ExpressionSpecificat
 }
 
 function buildPrefectureCasingWidthExpression(): maplibregl.ExpressionSpecification {
-  return ['interpolate', ['linear'], ['zoom'], 4, 2.4, 8, 3.4, 11, 4.2];
+  return ['interpolate', ['linear'], ['zoom'], 2, 0.8, 4, 1.4, 6, 2.2, 9, 3.0, 12, 3.6];
 }
 
-function buildPrefectureCasingOpacityExpression(): maplibregl.ExpressionSpecification {
-  return ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.65];
+function buildTieredLineOpacityExpression(
+  visitedOpacity: number,
+  plannedOpacity: number,
+  noneOpacity: number
+): maplibregl.ExpressionSpecification {
+  const activeByTier = (maxTier: number): maplibregl.ExpressionSpecification => [
+    'case',
+    ['<=', ['coalesce', ['get', 'borderTier'], 0], maxTier],
+    ['match', ['get', 'status'], 'visited', visitedOpacity, 'planned', plannedOpacity, noneOpacity],
+    0,
+  ];
+  return [
+    'step',
+    ['zoom'],
+    activeByTier(0),
+    6.0,
+    activeByTier(1),
+    7.5,
+    activeByTier(2),
+    9.0,
+    activeByTier(3),
+    10.5,
+    activeByTier(4),
+  ];
 }
 
 function buildPrefectureCoreLineColorExpression(): maplibregl.ExpressionSpecification {
@@ -391,11 +416,7 @@ function buildPrefectureCoreLineColorExpression(): maplibregl.ExpressionSpecific
 }
 
 function buildPrefectureCoreLineWidthExpression(): maplibregl.ExpressionSpecification {
-  return ['interpolate', ['linear'], ['zoom'], 4, 1.0, 8, 1.5, 11, 2.0];
-}
-
-function buildPrefectureCoreLineOpacityExpression(): maplibregl.ExpressionSpecification {
-  return ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.75];
+  return ['interpolate', ['linear'], ['zoom'], 2, 0.35, 4, 0.65, 6, 1.0, 9, 1.4, 12, 1.7];
 }
 
 type PrefectureLinePaint = {
@@ -418,8 +439,8 @@ function ensurePrefectureLineLayer(
         source: PREFECTURE_SOURCE_ID,
         layout: {
           visibility: 'visible',
-          'line-join': 'round',
-          'line-cap': 'round',
+          'line-join': 'bevel',
+          'line-cap': 'butt',
         },
         paint,
       },
@@ -461,16 +482,18 @@ export function syncPrefectureOverlayLayers(
     return;
   }
 
+  const renderData = expandPrefecturePolygonsForRendering(data);
+
   const existingSource = map.getSource(PREFECTURE_SOURCE_ID) as
     | maplibregl.GeoJSONSource
     | undefined;
   if (!existingSource) {
     map.addSource(PREFECTURE_SOURCE_ID, {
       type: 'geojson',
-      data,
+      data: renderData,
     });
   } else {
-    existingSource.setData(data);
+    existingSource.setData(renderData);
   }
 
   const resolvedBeforeId =
@@ -503,7 +526,7 @@ export function syncPrefectureOverlayLayers(
     {
       'line-color': PREFECTURE_CASING_COLOR,
       'line-width': buildPrefectureCasingWidthExpression(),
-      'line-opacity': buildPrefectureCasingOpacityExpression(),
+      'line-opacity': buildTieredLineOpacityExpression(0.8, 0.8, 0.62),
     },
     resolvedBeforeId
   );
@@ -514,7 +537,7 @@ export function syncPrefectureOverlayLayers(
     {
       'line-color': buildPrefectureCoreLineColorExpression(),
       'line-width': buildPrefectureCoreLineWidthExpression(),
-      'line-opacity': buildPrefectureCoreLineOpacityExpression(),
+      'line-opacity': buildTieredLineOpacityExpression(0.95, 0.95, 0.72),
     },
     resolvedBeforeId
   );

@@ -25,14 +25,27 @@ function createSamplePrefectureGeoJson(status: 'visited' | 'planned' | 'none'): 
         type: 'Feature',
         properties: { code: '13', name: '東京都', status },
         geometry: {
-          type: 'Polygon',
+          type: 'MultiPolygon',
           coordinates: [
+            // Primary mainland (~33km) -> borderTier 0
             [
-              [139.5, 35.5],
-              [139.9, 35.5],
-              [139.9, 35.8],
-              [139.5, 35.8],
-              [139.5, 35.5],
+              [
+                [139.5, 35.5],
+                [139.9, 35.5],
+                [139.9, 35.8],
+                [139.5, 35.8],
+                [139.5, 35.5],
+              ],
+            ],
+            // Tiny island (~1km) -> borderTier 4
+            [
+              [
+                [139.2, 34.0],
+                [139.21, 34.0],
+                [139.21, 34.01],
+                [139.2, 34.01],
+                [139.2, 34.0],
+              ],
             ],
           ],
         },
@@ -151,7 +164,12 @@ describe('syncPrefectureOverlayLayers', () => {
       beforeLayerId: 'visit-spots-clusters',
     });
 
-    expect(sources.get(PREFECTURE_SOURCE_ID)?.data).toBe(data);
+    const storedData = sources.get(PREFECTURE_SOURCE_ID)?.data as GeoJSON.FeatureCollection;
+    expect(storedData.features).toHaveLength(2);
+    expect(storedData.features[0].geometry.type).toBe('Polygon');
+    expect(storedData.features[0].properties?.borderTier).toBe(0);
+    expect(storedData.features[1].properties?.borderTier).toBe(4);
+
     expect(layers.map((l) => l.id)).toEqual([
       'base-osm',
       'terrain-hillshade',
@@ -163,29 +181,41 @@ describe('syncPrefectureOverlayLayers', () => {
     ]);
 
     const casing = layers.find((l) => l.id === PREFECTURE_LINE_CASING_LAYER_ID)!;
+    expect(casing.layout['line-join']).toBe('bevel');
+    expect(casing.layout['line-cap']).toBe('butt');
     expect(casing.paint['line-color']).toBe('#0f172a');
     expect(casing.paint['line-width']).toEqual([
       'interpolate',
       ['linear'],
       ['zoom'],
+      2,
+      0.8,
       4,
-      2.4,
-      8,
-      3.4,
-      11,
-      4.2,
+      1.4,
+      6,
+      2.2,
+      9,
+      3.0,
+      12,
+      3.6,
     ]);
     expect(casing.paint['line-opacity']).toEqual([
-      'match',
-      ['get', 'status'],
-      'visited',
-      0.8,
-      'planned',
-      0.8,
-      0.65,
+      'step',
+      ['zoom'],
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 0], ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.62], 0],
+      6.0,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 1], ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.62], 0],
+      7.5,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 2], ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.62], 0],
+      9.0,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 3], ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.62], 0],
+      10.5,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 4], ['match', ['get', 'status'], 'visited', 0.8, 'planned', 0.8, 0.62], 0],
     ]);
 
     const coreLine = layers.find((l) => l.id === PREFECTURE_LINE_LAYER_ID)!;
+    expect(coreLine.layout['line-join']).toBe('bevel');
+    expect(coreLine.layout['line-cap']).toBe('butt');
     expect(coreLine.paint['line-color']).toEqual([
       'match',
       ['get', 'status'],
@@ -199,21 +229,29 @@ describe('syncPrefectureOverlayLayers', () => {
       'interpolate',
       ['linear'],
       ['zoom'],
+      2,
+      0.35,
       4,
+      0.65,
+      6,
       1.0,
-      8,
-      1.5,
-      11,
-      2.0,
+      9,
+      1.4,
+      12,
+      1.7,
     ]);
     expect(coreLine.paint['line-opacity']).toEqual([
-      'match',
-      ['get', 'status'],
-      'visited',
-      0.95,
-      'planned',
-      0.95,
-      0.75,
+      'step',
+      ['zoom'],
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 0], ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.72], 0],
+      6.0,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 1], ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.72], 0],
+      7.5,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 2], ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.72], 0],
+      9.0,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 3], ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.72], 0],
+      10.5,
+      ['case', ['<=', ['coalesce', ['get', 'borderTier'], 0], 4], ['match', ['get', 'status'], 'visited', 0.95, 'planned', 0.95, 0.72], 0],
     ]);
   });
 
@@ -258,7 +296,10 @@ describe('syncPrefectureOverlayLayers', () => {
       beforeLayerId: 'visit-spots-clusters',
     });
 
-    expect(sources.get(PREFECTURE_SOURCE_ID)?.setData).toHaveBeenCalledWith(secondData);
+    expect(sources.get(PREFECTURE_SOURCE_ID)?.setData).toHaveBeenCalledTimes(1);
+    const updatedData = sources.get(PREFECTURE_SOURCE_ID)?.data as GeoJSON.FeatureCollection;
+    expect(updatedData.features).toHaveLength(2);
+    expect(updatedData.features[0].properties?.status).toBe('visited');
     for (const id of [
       PREFECTURE_FILL_LAYER_ID,
       PREFECTURE_LINE_CASING_LAYER_ID,

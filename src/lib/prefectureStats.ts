@@ -12,6 +12,7 @@ export interface PrefectureFeatureProperties {
   visitedSpotCount?: number;
   plannedSpotCount?: number;
   totalSpotCount?: number;
+  borderTier?: number;
 }
 
 export type PrefectureGeometry = GeoJSON.Polygon | GeoJSON.MultiPolygon;
@@ -547,6 +548,80 @@ export function buildColoredPrefectureGeoJson(
         },
       };
     }),
+  };
+}
+
+function measurePolygonMaxDimKm(outerRing: GeoJSON.Position[]): number {
+  const bbox = computeRingBBox(outerRing);
+  if (!Number.isFinite(bbox[0]) || !Number.isFinite(bbox[2])) return 0;
+  const midLat = (bbox[1] + bbox[3]) / 2;
+  const cosLat = Math.max(0.01, Math.cos((midLat * Math.PI) / 180));
+  const widthKm = ((bbox[2] - bbox[0]) * METERS_PER_DEG_LAT * cosLat) / 1000;
+  const heightKm = ((bbox[3] - bbox[1]) * METERS_PER_DEG_LAT) / 1000;
+  return Math.max(widthKm, heightKm);
+}
+
+function classifyPolygonBorderTier(maxDimKm: number, isPrimary: boolean): number {
+  if (isPrimary || maxDimKm >= 25) return 0;
+  if (maxDimKm >= 12) return 1;
+  if (maxDimKm >= 6) return 2;
+  if (maxDimKm >= 2.5) return 3;
+  return 4;
+}
+
+export function expandPrefecturePolygonsForRendering(
+  geojson: PrefectureFeatureCollection
+): GeoJSON.FeatureCollection<
+  GeoJSON.Polygon,
+  PrefectureFeatureProperties & { borderTier: number }
+> {
+  const expanded: Array<
+    GeoJSON.Feature<GeoJSON.Polygon, PrefectureFeatureProperties & { borderTier: number }>
+  > = [];
+
+  for (const feature of geojson.features) {
+    const geom = feature.geometry;
+    if (!geom) continue;
+    const rawPolygons: GeoJSON.Position[][][] =
+      geom.type === 'Polygon'
+        ? [geom.coordinates]
+        : geom.type === 'MultiPolygon'
+          ? geom.coordinates
+          : [];
+
+    const validPolygons: Array<{ rings: GeoJSON.Position[][]; maxDimKm: number }> = [];
+    let primaryIdx = 0;
+    let primaryMaxDim = -1;
+
+    for (const rings of rawPolygons) {
+      if (!rings || rings.length === 0 || rings[0].length < 3) continue;
+      const maxDimKm = measurePolygonMaxDimKm(rings[0]);
+      if (maxDimKm > primaryMaxDim) {
+        primaryMaxDim = maxDimKm;
+        primaryIdx = validPolygons.length;
+      }
+      validPolygons.push({ rings, maxDimKm });
+    }
+
+    for (let idx = 0; idx < validPolygons.length; idx++) {
+      const poly = validPolygons[idx];
+      expanded.push({
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: poly.rings,
+        },
+        properties: {
+          ...feature.properties,
+          borderTier: classifyPolygonBorderTier(poly.maxDimKm, idx === primaryIdx),
+        },
+      });
+    }
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: expanded,
   };
 }
 

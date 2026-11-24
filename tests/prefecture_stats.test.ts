@@ -5,6 +5,7 @@ import {
   buildColoredPrefectureGeoJson,
   buildPrefectureSpatialIndex,
   computePrefectureStats,
+  expandPrefecturePolygonsForRendering,
   extractPrefecturesFromAddress,
   findPrefectureForPoint,
   isPointInPolygon,
@@ -292,5 +293,60 @@ describe('prefectureStats', () => {
     const third = await loadPrefectureSpatialIndex(successFetch as unknown as typeof fetch);
     expect(third).toBe(first);
     expect(successFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('expands MultiPolygon prefectures into flat Polygons with borderTier classification', () => {
+    const synthetic: PrefectureFeatureCollection = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: { code: '99', name: 'テスト県', status: 'visited' },
+          geometry: {
+            type: 'MultiPolygon',
+            coordinates: [
+              // Small ~1 km island listed first -> should get tier 4
+              [
+                [
+                  [139.0, 35.0],
+                  [139.01, 35.0],
+                  [139.01, 35.01],
+                  [139.0, 35.01],
+                  [139.0, 35.0],
+                ],
+              ],
+              // Primary ~40 km mainland listed second -> must still get tier 0
+              [
+                [
+                  [139.2, 35.0],
+                  [139.6, 35.0],
+                  [139.6, 35.4],
+                  [139.2, 35.4],
+                  [139.2, 35.0],
+                ],
+              ],
+            ],
+          },
+        },
+      ],
+    };
+
+    const expandedSynthetic = expandPrefecturePolygonsForRendering(synthetic);
+    expect(expandedSynthetic.features).toHaveLength(2);
+    expect(expandedSynthetic.features[0].geometry.type).toBe('Polygon');
+    expect(expandedSynthetic.features[0].properties.borderTier).toBe(4);
+    expect(expandedSynthetic.features[1].properties.borderTier).toBe(0);
+    expect(expandedSynthetic.features[0].properties.status).toBe('visited');
+
+    // Verify against real 47-prefecture GeoJSON
+    const expandedReal = expandPrefecturePolygonsForRendering(prefectureGeoJson);
+    expect(expandedReal.features.length).toBeGreaterThan(700);
+    const tier0Codes = new Set(
+      expandedReal.features
+        .filter((f) => f.properties.borderTier === 0)
+        .map((f) => f.properties.code)
+    );
+    expect(tier0Codes.size).toBe(47);
+    expect(expandedReal.features.some((f) => f.properties.borderTier === 4)).toBe(true);
   });
 });
