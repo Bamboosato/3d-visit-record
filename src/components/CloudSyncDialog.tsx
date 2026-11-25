@@ -74,6 +74,7 @@ interface CloudSyncDialogProps {
   }) => Promise<StorageOperationResult>;
   onUndoLastRestore: () => Promise<StorageOperationResult>;
   onLocalExportRecorded: (iso: string) => Promise<void>;
+  onOpenExport?: () => void;
 }
 
 function formatByteSize(bytes: number): string {
@@ -129,6 +130,7 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
   onApplyImportedSpots,
   onUndoLastRestore,
   onLocalExportRecorded,
+  onOpenExport,
 }) => {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1012,8 +1014,23 @@ export const CloudSyncDialog: React.FC<CloudSyncDialogProps> = ({
               3D Visit Record のバックアップのほか、`3d_rain_viewer` のお気に入り JSON ファイルも読み込んで移行できます。
             </p>
             <p className="text-[11px] text-amber-200/90 leading-snug">
-              ※ 写真ファイル本体は JSON には含まれません。写真の引き継ぎには Google Drive 保存をご利用ください。
+              ※ 写真ファイル本体は JSON には含まれません。写真の引き継ぎや外部出力には Google Drive 保存または「写真付き ZIP」書き出しをご利用ください。
             </p>
+            {onOpenExport && (
+              <button
+                type="button"
+                id="cloud-sync-open-export-btn"
+                disabled={busy}
+                onClick={() => {
+                  onClose();
+                  onOpenExport();
+                }}
+                className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold border border-slate-700 cursor-pointer disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                <span>GeoJSON / CSV / KML / 写真付きZIP で書き出す</span>
+              </button>
+            )}
             {storageBlocked && (
               <button
                 type="button"

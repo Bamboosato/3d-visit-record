@@ -10,6 +10,7 @@ import {
   Map as MapIcon,
   Loader2,
   RefreshCw,
+  Download,
 } from 'lucide-react';
 import type { BaseMapId, PrefectureStats, WebGPUStatus } from '../types/visit';
 import { BASE_MAP_SOURCES } from '../lib/maplibreHelper';
@@ -33,6 +34,7 @@ interface LayerMenuProps {
   isOpen: boolean;
   onToggleOpen: () => void;
   onShareView: () => void;
+  onOpenExport?: () => void;
   onNavigatePolicy: (page: 'privacy' | 'terms') => void;
   connected?: boolean;
 }
@@ -52,6 +54,7 @@ export const LayerMenu: React.FC<LayerMenuProps> = ({
   isOpen,
   onToggleOpen,
   onShareView,
+  onOpenExport,
   onNavigatePolicy,
   connected = false,
 }) => {
@@ -236,6 +239,23 @@ export const LayerMenu: React.FC<LayerMenuProps> = ({
               ※ 共有リンクには座標・視点のみ含まれ、訪問日やメモは含まれません。
             </p>
           </div>
+
+          {onOpenExport && (
+            <div className="pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                id="layer-menu-export-btn"
+                onClick={() => {
+                  onToggleOpen();
+                  onOpenExport();
+                }}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold border border-slate-700 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                <span>データ書き出し（GeoJSON / CSV / KML / ZIP）</span>
+              </button>
+            </div>
+          )}
 
           {/* 描画エンジン情報 & 法務リンク */}
           <div className="pt-2 border-t border-slate-800 space-y-2 text-[11px] text-slate-400">

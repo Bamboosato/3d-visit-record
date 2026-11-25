@@ -18,6 +18,7 @@ import { StatusFilterBar } from './components/StatusFilterBar';
 import { SpotDetailSheet, type PendingPhotoDraft } from './components/SpotDetailSheet';
 import { SpotNavDrawer } from './components/SpotNavDrawer';
 import { CloudSyncDialog } from './components/CloudSyncDialog';
+import { ExportDialog } from './components/ExportDialog';
 import { LayerMenu } from './components/LayerMenu';
 import { PrefectureSummaryLegend } from './components/PrefectureSummaryLegend';
 import { StaticPolicyPage } from './components/StaticPolicyPage';
@@ -176,6 +177,7 @@ export const App: React.FC = () => {
   const [isFilterMenuOpen, setIsFilterMenuOpen] = useState(false);
   const [isLayerOpen, setIsLayerOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
+  const [isExportOpen, setIsExportOpen] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
   const [isMapLoading, setIsMapLoading] = useState(true);
   const [toastText, setToastText] = useState<string | null>(null);
@@ -373,25 +375,36 @@ export const App: React.FC = () => {
     setIsFilterMenuOpen(false);
     setIsLayerOpen(false);
     setIsSyncOpen(false);
+    setIsExportOpen(false);
     setIsNavOpen((prev) => !prev);
   };
   const openFilterMenu = () => {
     setIsNavOpen(false);
     setIsLayerOpen(false);
     setIsSyncOpen(false);
+    setIsExportOpen(false);
     setIsFilterMenuOpen((prev) => !prev);
   };
   const openLayer = () => {
     setIsFilterMenuOpen(false);
     setIsNavOpen(false);
     setIsSyncOpen(false);
+    setIsExportOpen(false);
     setIsLayerOpen((prev) => !prev);
   };
   const openSync = () => {
     setIsFilterMenuOpen(false);
     setIsNavOpen(false);
     setIsLayerOpen(false);
+    setIsExportOpen(false);
     setIsSyncOpen(true);
+  };
+  const openExport = () => {
+    setIsFilterMenuOpen(false);
+    setIsNavOpen(false);
+    setIsLayerOpen(false);
+    setIsSyncOpen(false);
+    setIsExportOpen(true);
   };
 
   const handleSelectSpot = useCallback(
@@ -1355,6 +1368,7 @@ export const App: React.FC = () => {
             isOpen={isLayerOpen}
             onToggleOpen={openLayer}
             onShareView={handleShareCurrentView}
+            onOpenExport={openExport}
             onNavigatePolicy={(page) => {
               setIsLayerOpen(false);
               navigateRoute(page === 'privacy' ? '/privacy' : '/terms');
@@ -1464,7 +1478,7 @@ export const App: React.FC = () => {
       />
 
       {/* Bottom-right Floating Action Button: 写真から記録を作成（案B） */}
-      {!selectedSpot && !inspectedPoint && !photoProposal && !isNavOpen && !isSyncOpen && (
+      {!selectedSpot && !inspectedPoint && !photoProposal && !isNavOpen && !isSyncOpen && !isExportOpen && (
         <button
           type="button"
           id="fab-create-from-photo"
@@ -1535,6 +1549,16 @@ export const App: React.FC = () => {
         onPhotoCacheUpdated={handlePhotoCacheUpdated}
         onApplyImportedSpots={handleApplyImportedSpots}
         onUndoLastRestore={handleUndoLastRestore}
+        onLocalExportRecorded={handleLocalExportRecorded}
+        onOpenExport={openExport}
+      />
+
+      {/* Native <dialog> Data Export Modal */}
+      <ExportDialog
+        isOpen={isExportOpen}
+        onClose={() => setIsExportOpen(false)}
+        spots={appState.spots}
+        mapStatusFilter={statusFilter}
         onLocalExportRecorded={handleLocalExportRecorded}
       />
     </div>

@@ -12,6 +12,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "lucide-react": "^1.16.0",
     "maplibre-gl": "6.17.0",
     "react": "^19.0.0",
